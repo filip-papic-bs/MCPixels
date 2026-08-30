@@ -258,7 +258,6 @@ function App() {
   const [lockExportRatio, setLockExportRatio] = useState(true);
   const [exportError, setExportError] = useState("");
   const [isExporting, setIsExporting] = useState(false);
-  const [showInfo, setShowInfo] = useState(true);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pixelsRef = useRef(pixels);
   const viewportRef = useRef(viewport);
@@ -854,7 +853,7 @@ function App() {
   const statusText = {
     checking: "Checking WebMCP",
     ready: "5 agent tools ready",
-    unavailable: "WebMCP browser required",
+    unavailable: "Best in ChatGPT browser",
     error: "Tool registration failed",
   }[webMcpStatus];
 
@@ -1108,40 +1107,6 @@ function App() {
       </header>
 
       <section className="editor" aria-label="MCPixels editor">
-        {showInfo ? (
-          <aside className="info-card">
-            <button type="button" aria-label="Hide instructions" onClick={() => setShowInfo(false)}>×</button>
-            <p>Use Select for rectangular edits. On touch screens, use Pan to move and pinch to zoom.</p>
-          </aside>
-        ) : (
-          <button className="show-info" type="button" onClick={() => setShowInfo(true)}>Show info</button>
-        )}
-
-        <div className="history-actions" role="group" aria-label="Edit history">
-          <button
-            type="button"
-            disabled={pixelHistory.undoStack.length === 0}
-            onClick={undoPixels}
-            aria-label="Undo last pixel edit"
-            title="Undo"
-          >
-            <svg viewBox="0 0 16 16" aria-hidden="true">
-              <path d="M6 4 2.5 7.5 6 11M3 7.5h5a5 5 0 0 1 5 5" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            disabled={pixelHistory.redoStack.length === 0}
-            onClick={redoPixels}
-            aria-label="Redo last pixel edit"
-            title="Redo"
-          >
-            <svg viewBox="0 0 16 16" aria-hidden="true">
-              <path d="m10 4 3.5 3.5L10 11m3-3.5H8a5 5 0 0 0-5 5" />
-            </svg>
-          </button>
-        </div>
-
         <div className="toolbar" aria-label="Drawing controls">
           <fieldset className="color-control">
             <legend>Color</legend>
@@ -1192,12 +1157,49 @@ function App() {
             </div>
           </fieldset>
 
+          <fieldset className="history-control">
+            <legend>History</legend>
+            <div className="history-buttons">
+              <button
+                type="button"
+                disabled={pixelHistory.undoStack.length === 0}
+                onClick={undoPixels}
+                aria-label="Undo last pixel edit"
+                title="Undo"
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M6 4 2.5 7.5 6 11M3 7.5h5a5 5 0 0 1 5 5" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                disabled={pixelHistory.redoStack.length === 0}
+                onClick={redoPixels}
+                aria-label="Redo last pixel edit"
+                title="Redo"
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="m10 4 3.5 3.5L10 11m3-3.5H8a5 5 0 0 0-5 5" />
+                </svg>
+              </button>
+            </div>
+          </fieldset>
+
           <fieldset className="zoom-control">
             <legend>Zoom</legend>
             <div className="zoom-buttons">
-              <button type="button" aria-label="Zoom out" onClick={() => zoomTo(viewport.zoom / 1.2)}>−</button>
-              <output aria-label="Current zoom">{Math.round(viewport.zoom)}px</output>
-              <button type="button" aria-label="Zoom in" onClick={() => zoomTo(viewport.zoom * 1.2)}>+</button>
+              <button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => zoomTo(viewport.zoom / 1.2)}>
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <circle cx="6.5" cy="6.5" r="4" />
+                  <path d="M4.5 6.5h4m1 3 4 4" />
+                </svg>
+              </button>
+              <button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => zoomTo(viewport.zoom * 1.2)}>
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <circle cx="6.5" cy="6.5" r="4" />
+                  <path d="M4.5 6.5h4m-2-2v4m3-1 4 4" />
+                </svg>
+              </button>
               <button
                 className="home-button"
                 type="button"
