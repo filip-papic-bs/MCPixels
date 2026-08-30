@@ -176,7 +176,8 @@ legend {
 }
 
 .swatch,
-.custom-color {
+.custom-color,
+.color-picker-button {
   position: relative;
   display: grid;
   width: 100%;
@@ -202,6 +203,27 @@ legend {
   color: #f7f7f3;
   font-size: 1rem;
   background: #383a36;
+}
+
+.color-picker-button {
+  padding: 0;
+  color: #f7f7f3;
+  background: #383a36;
+}
+
+.color-picker-button--active {
+  color: #1a1b19;
+  background: #f7f7f3;
+}
+
+.color-picker-button svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: square;
+  stroke-linejoin: miter;
+  stroke-width: 1.3;
 }
 
 .custom-color input {
@@ -334,6 +356,10 @@ legend {
 
 .pixel-canvas--fill {
   cursor: cell;
+}
+
+.pixel-canvas--picker {
+  cursor: copy;
 }
 
 .pixel-canvas--pan {
@@ -682,12 +708,13 @@ legend {
   }
 
   .palette {
-    grid-template-columns: repeat(9, 1fr);
+    grid-template-columns: repeat(10, 1fr);
     gap: 5px;
   }
 
   .swatch,
-  .custom-color {
+  .custom-color,
+  .color-picker-button {
     height: 26px;
     aspect-ratio: auto;
   }

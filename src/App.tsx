@@ -50,7 +50,7 @@ type Viewport = { x: number; y: number; zoom: number };
 type SelectionBounds = { minX: number; minY: number; maxX: number; maxY: number };
 type CopiedSelection = { pixels: PixelChange[]; width: number; height: number };
 type ScreenPoint = { x: number; y: number };
-type Tool = "paint" | "erase" | "fill" | "pan" | "select";
+type Tool = "paint" | "erase" | "fill" | "picker" | "pan" | "select";
 type ExportMode = "scale" | "dimensions";
 type FillResult = {
   changes: PixelChange[];
@@ -328,6 +328,7 @@ function App() {
   const viewportRef = useRef(viewport);
   const pointerRef = useRef<PointerState>(null);
   const historyGroupRef = useRef(0);
+  const toolBeforePickerRef = useRef<"paint" | "fill">("paint");
   const touchPointsRef = useRef(new Map<number, ScreenPoint>());
   const spacePressedRef = useRef(false);
   const suppressContextMenuRef = useRef(false);
@@ -530,6 +531,19 @@ function App() {
     else setActivity("That area already uses the selected color.");
   };
 
+  const pickColorAt = (clientX: number, clientY: number) => {
+    const pixel = getPixelAt(clientX, clientY);
+    if (!pixel) return;
+    const color = pixelsRef.current.get(pixelKey(pixel.x, pixel.y));
+    if (!color) {
+      setActivity("There is no color at that pixel to pick.");
+      return;
+    }
+    setSelectedColor(color);
+    setTool(toolBeforePickerRef.current);
+    setActivity(`Picked ${color} from pixel (${pixel.x}, ${pixel.y}).`);
+  };
+
   const startSelectionAt = (clientX: number, clientY: number) => {
     const pixel = getPixelAt(clientX, clientY);
     if (!pixel) return;
@@ -544,9 +558,10 @@ function App() {
       tool === "pan" ||
       (event.button === 0 && spacePressedRef.current);
     const shouldFill = event.button === 0 && !shouldPan && tool === "fill";
+    const shouldPickColor = event.button === 0 && !shouldPan && tool === "picker";
     const shouldSelect = event.button === 0 && !shouldPan && tool === "select";
     const shouldDraw = event.button === 0 && !shouldPan && (tool === "paint" || tool === "erase");
-    if (!shouldPan && !shouldDraw && !shouldFill && !shouldSelect) return;
+    if (!shouldPan && !shouldDraw && !shouldFill && !shouldPickColor && !shouldSelect) return;
 
     if (event.button !== 2) event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -571,6 +586,10 @@ function App() {
     }
     if (shouldFill) {
       fillAt(event.clientX, event.clientY);
+      return;
+    }
+    if (shouldPickColor) {
+      pickColorAt(event.clientX, event.clientY);
       return;
     }
     if (shouldDraw) {
@@ -1221,6 +1240,21 @@ function App() {
                   }}
                 />
               </label>
+              <button
+                className={tool === "picker" ? "color-picker-button color-picker-button--active" : "color-picker-button"}
+                type="button"
+                aria-label="Pick a color from the canvas"
+                aria-pressed={tool === "picker"}
+                title="Pick color"
+                onClick={() => {
+                  if (tool !== "picker") toolBeforePickerRef.current = tool === "fill" ? "fill" : "paint";
+                  setTool("picker");
+                }}
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="m9.5 2.5 4 4-2 2-1-1-5.5 5.5H2.5v-2.5L8 5l-1-1zM4.5 11.5h-2" />
+                </svg>
+              </button>
             </div>
           </fieldset>
 
@@ -1310,7 +1344,7 @@ function App() {
           <canvas
             ref={canvasRef}
             className={`pixel-canvas pixel-canvas--${tool}${isPanning ? " pixel-canvas--panning" : ""}`}
-            aria-label="Unbounded pixel canvas. Use Draw, Erase, Fill, or Select; right-drag or Space-drag to pan, and use the mouse wheel to zoom."
+            aria-label="Unbounded pixel canvas. Use Draw, Erase, Fill, Pick color, or Select; right-drag or Space-drag to pan, and use the mouse wheel to zoom."
             tabIndex={0}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
