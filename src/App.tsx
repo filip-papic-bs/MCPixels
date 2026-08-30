@@ -19,6 +19,7 @@ const SELECTION_ACTIONS_GAP = 8;
 const DEFAULT_EXPORT_SCALE = 8;
 const MAX_EXPORT_SCALE = 64;
 const MAX_EXPORT_DIMENSION = 4096;
+const HISTORY_LIMIT = 100;
 const COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
 const PALETTE = [
   "#161616",
@@ -33,9 +34,17 @@ const PALETTE = [
 
 type PixelChange = { x: number; y: number; color: string };
 type PixelAction =
-  | { type: "paint"; changes: PixelChange[] }
+  | { type: "paint"; changes: PixelChange[]; historyGroup?: number }
   | { type: "clear-area"; bounds: SelectionBounds }
-  | { type: "clear" };
+  | { type: "clear" }
+  | { type: "undo" }
+  | { type: "redo" };
+type PixelHistory = {
+  pixels: Map<string, string>;
+  undoStack: Map<string, string>[];
+  redoStack: Map<string, string>[];
+  historyGroup: number | null;
+};
 type Viewport = { x: number; y: number; zoom: number };
 type SelectionBounds = { minX: number; minY: number; maxX: number; maxY: number };
 type CopiedSelection = { pixels: PixelChange[]; width: number; height: number };
@@ -48,7 +57,7 @@ type PersistedEditorState = {
   selectedColor: string;
 };
 type PointerState =
-  | { kind: "draw"; lastPixel: { x: number; y: number } }
+  | { kind: "draw"; lastPixel: { x: number; y: number }; historyGroup: number }
   | { kind: "select"; anchor: { x: number; y: number } }
   | { kind: "pinch"; lastCenter: ScreenPoint; lastDistance: number }
   | {
@@ -64,27 +73,68 @@ type PointerState =
 
 const pixelKey = (x: number, y: number) => `${x},${y}`;
 
-function pixelReducer(pixels: Map<string, string>, action: PixelAction) {
-  if (action.type === "clear") return new Map<string, string>();
+function pixelReducer(state: PixelHistory, action: PixelAction): PixelHistory {
+  if (action.type === "undo") {
+    const pixels = state.undoStack.at(-1);
+    if (!pixels) return state;
+    return {
+      pixels,
+      undoStack: state.undoStack.slice(0, -1),
+      redoStack: [...state.redoStack, state.pixels].slice(-HISTORY_LIMIT),
+      historyGroup: null,
+    };
+  }
 
-  if (action.type === "clear-area") {
-    const next = new Map(pixels);
-    for (const key of pixels.keys()) {
+  if (action.type === "redo") {
+    const pixels = state.redoStack.at(-1);
+    if (!pixels) return state;
+    return {
+      pixels,
+      undoStack: [...state.undoStack, state.pixels].slice(-HISTORY_LIMIT),
+      redoStack: state.redoStack.slice(0, -1),
+      historyGroup: null,
+    };
+  }
+
+  let next: Map<string, string>;
+  let changed = false;
+  if (action.type === "clear") {
+    if (state.pixels.size === 0) return state;
+    next = new Map<string, string>();
+    changed = true;
+  } else if (action.type === "clear-area") {
+    next = new Map(state.pixels);
+    for (const key of state.pixels.keys()) {
       const [x, y] = key.split(",").map(Number);
       if (x >= action.bounds.minX && x <= action.bounds.maxX && y >= action.bounds.minY && y <= action.bounds.maxY) {
         next.delete(key);
+        changed = true;
       }
     }
-    return next;
+  } else {
+    next = new Map(state.pixels);
+    for (const { x, y, color } of action.changes) {
+      const key = pixelKey(x, y);
+      if (color === EMPTY_PIXEL) {
+        if (next.delete(key)) changed = true;
+      } else if (next.get(key) !== color) {
+        next.set(key, color);
+        changed = true;
+      }
+    }
   }
 
-  const next = new Map(pixels);
-  for (const { x, y, color } of action.changes) {
-    const key = pixelKey(x, y);
-    if (color === EMPTY_PIXEL) next.delete(key);
-    else next.set(key, color);
-  }
-  return next;
+  if (!changed) return state;
+  const historyGroup = action.type === "paint" ? action.historyGroup ?? null : null;
+  const continuesHistoryGroup = historyGroup !== null && historyGroup === state.historyGroup;
+  return {
+    pixels: next,
+    undoStack: continuesHistoryGroup
+      ? state.undoStack
+      : [...state.undoStack, state.pixels].slice(-HISTORY_LIMIT),
+    redoStack: [],
+    historyGroup,
+  };
 }
 
 function isCoordinate(value: unknown): value is number {
@@ -185,7 +235,13 @@ function pixelsOnLine(from: { x: number; y: number }, to: { x: number; y: number
 
 function App() {
   const [initialState] = useState(loadPersistedState);
-  const [pixels, dispatch] = useReducer(pixelReducer, initialState.pixels);
+  const [pixelHistory, dispatch] = useReducer(pixelReducer, {
+    pixels: initialState.pixels,
+    undoStack: [],
+    redoStack: [],
+    historyGroup: null,
+  });
+  const pixels = pixelHistory.pixels;
   const [selectedColor, setSelectedColor] = useState(initialState.selectedColor);
   const [tool, setTool] = useState<Tool>("paint");
   const [viewport, setViewport] = useState<Viewport>(initialState.viewport);
@@ -207,6 +263,7 @@ function App() {
   const pixelsRef = useRef(pixels);
   const viewportRef = useRef(viewport);
   const pointerRef = useRef<PointerState>(null);
+  const historyGroupRef = useRef(0);
   const touchPointsRef = useRef(new Map<number, ScreenPoint>());
   const spacePressedRef = useRef(false);
   const suppressContextMenuRef = useRef(false);
@@ -254,9 +311,26 @@ function App() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.code !== "Space" || event.repeat) return;
       const target = event.target as HTMLElement | null;
-      if (target?.matches("input, textarea, select, button")) return;
+      const isTyping = target?.matches("input, textarea, select") || target?.isContentEditable;
+      const modifierPressed = event.metaKey || event.ctrlKey;
+      const key = event.key.toLowerCase();
+      const wantsUndo = modifierPressed && key === "z" && !event.shiftKey;
+      const wantsRedo = modifierPressed && ((key === "z" && event.shiftKey) || key === "y");
+
+      if (!showExport && !isTyping && wantsUndo && pixelHistory.undoStack.length > 0) {
+        event.preventDefault();
+        dispatch({ type: "undo" });
+        setActivity("Undid the last pixel edit.");
+        return;
+      }
+      if (!showExport && !isTyping && wantsRedo && pixelHistory.redoStack.length > 0) {
+        event.preventDefault();
+        dispatch({ type: "redo" });
+        setActivity("Redid the last pixel edit.");
+        return;
+      }
+      if (event.code !== "Space" || event.repeat || isTyping || target?.matches("button")) return;
       spacePressedRef.current = true;
       event.preventDefault();
     };
@@ -274,7 +348,7 @@ function App() {
       window.removeEventListener("keyup", handleKeyUp);
       window.removeEventListener("blur", handleBlur);
     };
-  }, []);
+  }, [pixelHistory.redoStack.length, pixelHistory.undoStack.length, showExport]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -354,10 +428,13 @@ function App() {
     const pixel = getPixelAt(clientX, clientY);
     if (!pixel) return;
     const color = tool === "erase" ? EMPTY_PIXEL : selectedColor;
-    pointerRef.current = { kind: "draw", lastPixel: pixel };
+    historyGroupRef.current += 1;
+    const historyGroup = historyGroupRef.current;
+    pointerRef.current = { kind: "draw", lastPixel: pixel, historyGroup };
     dispatch({
       type: "paint",
       changes: [{ ...pixel, color }],
+      historyGroup,
     });
     setActivity(`You ${tool === "erase" ? "erased" : "painted"} pixel (${pixel.x}, ${pixel.y}).`);
   };
@@ -366,8 +443,12 @@ function App() {
     const pixel = getPixelAt(clientX, clientY);
     if (!pixel || (pixel.x === pointer.lastPixel.x && pixel.y === pointer.lastPixel.y)) return;
     const color = tool === "erase" ? EMPTY_PIXEL : selectedColor;
-    dispatch({ type: "paint", changes: pixelsOnLine(pointer.lastPixel, pixel, color) });
-    pointerRef.current = { kind: "draw", lastPixel: pixel };
+    dispatch({
+      type: "paint",
+      changes: pixelsOnLine(pointer.lastPixel, pixel, color),
+      historyGroup: pointer.historyGroup,
+    });
+    pointerRef.current = { kind: "draw", lastPixel: pixel, historyGroup: pointer.historyGroup };
     setActivity(`You ${tool === "erase" ? "erased to" : "painted to"} pixel (${pixel.x}, ${pixel.y}).`);
   };
 
@@ -1002,6 +1083,18 @@ function App() {
     setActivity("Selection dismissed.");
   };
 
+  const undoPixels = () => {
+    if (pixelHistory.undoStack.length === 0) return;
+    dispatch({ type: "undo" });
+    setActivity("Undid the last pixel edit.");
+  };
+
+  const redoPixels = () => {
+    if (pixelHistory.redoStack.length === 0) return;
+    dispatch({ type: "redo" });
+    setActivity("Redid the last pixel edit.");
+  };
+
   return (
     <main className="app-shell">
       <header className="masthead">
@@ -1023,6 +1116,31 @@ function App() {
         ) : (
           <button className="show-info" type="button" onClick={() => setShowInfo(true)}>Show info</button>
         )}
+
+        <div className="history-actions" role="group" aria-label="Edit history">
+          <button
+            type="button"
+            disabled={pixelHistory.undoStack.length === 0}
+            onClick={undoPixels}
+            aria-label="Undo last pixel edit"
+            title="Undo"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M6 4 2.5 7.5 6 11M3 7.5h5a5 5 0 0 1 5 5" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            disabled={pixelHistory.redoStack.length === 0}
+            onClick={redoPixels}
+            aria-label="Redo last pixel edit"
+            title="Redo"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="m10 4 3.5 3.5L10 11m3-3.5H8a5 5 0 0 0-5 5" />
+            </svg>
+          </button>
+        </div>
 
         <div className="toolbar" aria-label="Drawing controls">
           <fieldset className="color-control">
