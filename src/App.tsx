@@ -12,6 +12,9 @@ const DEFAULT_ZOOM = 22;
 const DRAG_THRESHOLD = 5;
 const MAX_TOOL_COORDINATE = 1_000_000;
 const STORAGE_KEY = "mcpixels.editor.v1";
+const SELECTION_ACTIONS_WIDTH = 139;
+const SELECTION_ACTIONS_HEIGHT = 32;
+const SELECTION_ACTIONS_GAP = 8;
 const COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
 const PALETTE = [
   "#161616",
@@ -27,9 +30,12 @@ const PALETTE = [
 type PixelChange = { x: number; y: number; color: string };
 type PixelAction =
   | { type: "paint"; changes: PixelChange[] }
+  | { type: "clear-area"; bounds: SelectionBounds }
   | { type: "clear" };
 type Viewport = { x: number; y: number; zoom: number };
-type Tool = "paint" | "erase" | "pan";
+type SelectionBounds = { minX: number; minY: number; maxX: number; maxY: number };
+type ScreenPoint = { x: number; y: number };
+type Tool = "paint" | "erase" | "pan" | "lasso";
 type PersistedEditorState = {
   pixels: Map<string, string>;
   viewport: Viewport;
@@ -37,6 +43,8 @@ type PersistedEditorState = {
 };
 type PointerState =
   | { kind: "draw"; lastPixel: { x: number; y: number } }
+  | { kind: "select"; anchor: { x: number; y: number } }
+  | { kind: "pinch"; lastCenter: ScreenPoint; lastDistance: number }
   | {
       kind: "pan";
       startX: number;
@@ -53,6 +61,17 @@ const pixelKey = (x: number, y: number) => `${x},${y}`;
 function pixelReducer(pixels: Map<string, string>, action: PixelAction) {
   if (action.type === "clear") return new Map<string, string>();
 
+  if (action.type === "clear-area") {
+    const next = new Map(pixels);
+    for (const key of pixels.keys()) {
+      const [x, y] = key.split(",").map(Number);
+      if (x >= action.bounds.minX && x <= action.bounds.maxX && y >= action.bounds.minY && y <= action.bounds.maxY) {
+        next.delete(key);
+      }
+    }
+    return next;
+  }
+
   const next = new Map(pixels);
   for (const { x, y, color } of action.changes) {
     const key = pixelKey(x, y);
@@ -68,6 +87,24 @@ function isCoordinate(value: unknown): value is number {
 
 function clampZoom(zoom: number) {
   return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
+}
+
+function selectionBounds(from: { x: number; y: number }, to: { x: number; y: number }): SelectionBounds {
+  return {
+    minX: Math.min(from.x, to.x),
+    minY: Math.min(from.y, to.y),
+    maxX: Math.max(from.x, to.x),
+    maxY: Math.max(from.y, to.y),
+  };
+}
+
+function getPinchMetrics(points: Map<number, ScreenPoint>) {
+  const [first, second] = Array.from(points.values());
+  if (!first || !second) return null;
+  return {
+    center: { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 },
+    distance: Math.max(1, Math.hypot(second.x - first.x, second.y - first.y)),
+  };
 }
 
 function loadPersistedState(): PersistedEditorState {
@@ -150,11 +187,13 @@ function App() {
   const [activity, setActivity] = useState("Canvas ready. Pick a color and draw.");
   const [webMcpStatus, setWebMcpStatus] = useState<"checking" | "ready" | "unavailable" | "error">("checking");
   const [isPanning, setIsPanning] = useState(false);
+  const [selection, setSelection] = useState<SelectionBounds | null>(null);
   const [showInfo, setShowInfo] = useState(true);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pixelsRef = useRef(pixels);
   const viewportRef = useRef(viewport);
   const pointerRef = useRef<PointerState>(null);
+  const touchPointsRef = useRef(new Map<number, ScreenPoint>());
   const spacePressedRef = useRef(false);
   const suppressContextMenuRef = useRef(false);
   pixelsRef.current = pixels;
@@ -318,17 +357,44 @@ function App() {
     setActivity(`You ${tool === "erase" ? "erased to" : "painted to"} pixel (${pixel.x}, ${pixel.y}).`);
   };
 
+  const startSelectionAt = (clientX: number, clientY: number) => {
+    const pixel = getPixelAt(clientX, clientY);
+    if (!pixel) return;
+    pointerRef.current = { kind: "select", anchor: pixel };
+    setSelection(selectionBounds(pixel, pixel));
+  };
+
   const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     const shouldPan =
       event.button === 1 ||
       event.button === 2 ||
       tool === "pan" ||
       (event.button === 0 && spacePressedRef.current);
-    const shouldDraw = event.button === 0 && !shouldPan;
-    if (!shouldPan && !shouldDraw) return;
+    const shouldSelect = event.button === 0 && !shouldPan && tool === "lasso";
+    const shouldDraw = event.button === 0 && !shouldPan && !shouldSelect;
+    if (!shouldPan && !shouldDraw && !shouldSelect) return;
 
     if (event.button !== 2) event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
+
+    if (event.pointerType === "touch" && tool === "pan") {
+      touchPointsRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      const pinch = getPinchMetrics(touchPointsRef.current);
+      if (pinch) {
+        pointerRef.current = {
+          kind: "pinch",
+          lastCenter: pinch.center,
+          lastDistance: pinch.distance,
+        };
+        setIsPanning(true);
+        return;
+      }
+    }
+
+    if (shouldSelect) {
+      startSelectionAt(event.clientX, event.clientY);
+      return;
+    }
     if (shouldDraw) {
       startDrawingAt(event.clientX, event.clientY);
       return;
@@ -347,11 +413,50 @@ function App() {
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (touchPointsRef.current.has(event.pointerId)) {
+      touchPointsRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    }
     const pointer = pointerRef.current;
     if (!pointer || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
 
+    if (pointer.kind === "pinch") {
+      const pinch = getPinchMetrics(touchPointsRef.current);
+      if (!pinch) return;
+      const bounds = event.currentTarget.getBoundingClientRect();
+      const previousAnchor = {
+        x: pointer.lastCenter.x - bounds.left,
+        y: pointer.lastCenter.y - bounds.top,
+      };
+      const nextAnchor = {
+        x: pinch.center.x - bounds.left,
+        y: pinch.center.y - bounds.top,
+      };
+      setViewport((current) => {
+        const zoom = clampZoom(current.zoom * (pinch.distance / pointer.lastDistance));
+        const worldX = current.x + (previousAnchor.x - canvasSize.width / 2) / current.zoom;
+        const worldY = current.y + (previousAnchor.y - canvasSize.height / 2) / current.zoom;
+        return {
+          x: worldX - (nextAnchor.x - canvasSize.width / 2) / zoom,
+          y: worldY - (nextAnchor.y - canvasSize.height / 2) / zoom,
+          zoom,
+        };
+      });
+      pointerRef.current = {
+        kind: "pinch",
+        lastCenter: pinch.center,
+        lastDistance: pinch.distance,
+      };
+      return;
+    }
+
     if (pointer.kind === "draw") {
       continueDrawingAt(event.clientX, event.clientY, pointer);
+      return;
+    }
+
+    if (pointer.kind === "select") {
+      const pixel = getPixelAt(event.clientX, event.clientY);
+      if (pixel) setSelection(selectionBounds(pointer.anchor, pixel));
       return;
     }
 
@@ -380,6 +485,42 @@ function App() {
   const handlePointerEnd = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    touchPointsRef.current.delete(event.pointerId);
+    if (pointerRef.current?.kind === "pinch") {
+      const pinch = getPinchMetrics(touchPointsRef.current);
+      if (pinch) {
+        pointerRef.current = {
+          kind: "pinch",
+          lastCenter: pinch.center,
+          lastDistance: pinch.distance,
+        };
+      } else {
+        const remainingTouch = Array.from(touchPointsRef.current.values())[0];
+        pointerRef.current = remainingTouch
+          ? {
+              kind: "pan",
+              startX: remainingTouch.x,
+              startY: remainingTouch.y,
+              lastX: remainingTouch.x,
+              lastY: remainingTouch.y,
+              hasDragged: true,
+              button: 0,
+            }
+          : null;
+        setIsPanning(Boolean(remainingTouch));
+      }
+      return;
+    }
+    if (pointerRef.current?.kind === "select") {
+      const pixel = getPixelAt(event.clientX, event.clientY);
+      if (pixel) {
+        const bounds = selectionBounds(pointerRef.current.anchor, pixel);
+        setSelection(bounds);
+        const width = bounds.maxX - bounds.minX + 1;
+        const height = bounds.maxY - bounds.minY + 1;
+        setActivity(`Selected ${width} by ${height} pixels.`);
+      }
     }
     pointerRef.current = null;
     setIsPanning(false);
@@ -427,6 +568,12 @@ function App() {
   }, [canvasSize]);
 
   const handleCanvasKeyDown = (event: ReactKeyboardEvent<HTMLCanvasElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setSelection(null);
+      setActivity("Selection dismissed.");
+      return;
+    }
     if (event.key === "+" || event.key === "=") {
       event.preventDefault();
       zoomTo(viewport.zoom * 1.2);
@@ -616,6 +763,51 @@ function App() {
     error: "Tool registration failed",
   }[webMcpStatus];
 
+  const selectionScreen = selection
+    ? {
+        left: (selection.minX - viewport.x) * viewport.zoom + canvasSize.width / 2,
+        top: (selection.minY - viewport.y) * viewport.zoom + canvasSize.height / 2,
+        width: (selection.maxX - selection.minX + 1) * viewport.zoom,
+        height: (selection.maxY - selection.minY + 1) * viewport.zoom,
+      }
+    : null;
+  const selectionActionsStyle = selectionScreen
+    ? {
+        left: Math.min(
+          Math.max(SELECTION_ACTIONS_GAP, selectionScreen.left + selectionScreen.width - SELECTION_ACTIONS_WIDTH),
+          Math.max(SELECTION_ACTIONS_GAP, canvasSize.width - SELECTION_ACTIONS_WIDTH - SELECTION_ACTIONS_GAP),
+        ),
+        top: Math.min(
+          Math.max(
+            SELECTION_ACTIONS_GAP,
+            selectionScreen.top >= SELECTION_ACTIONS_HEIGHT + SELECTION_ACTIONS_GAP * 2
+              ? selectionScreen.top - SELECTION_ACTIONS_HEIGHT - SELECTION_ACTIONS_GAP
+              : selectionScreen.top + selectionScreen.height + SELECTION_ACTIONS_GAP,
+          ),
+          Math.max(SELECTION_ACTIONS_GAP, canvasSize.height - SELECTION_ACTIONS_HEIGHT - SELECTION_ACTIONS_GAP),
+        ),
+      }
+    : null;
+
+  const clearSelection = () => {
+    if (!selection) return;
+    let cleared = 0;
+    for (const key of pixelsRef.current.keys()) {
+      const [x, y] = key.split(",").map(Number);
+      if (x >= selection.minX && x <= selection.maxX && y >= selection.minY && y <= selection.maxY) {
+        cleared += 1;
+      }
+    }
+    dispatch({ type: "clear-area", bounds: selection });
+    setSelection(null);
+    setActivity(`Cleared ${cleared} pixel${cleared === 1 ? "" : "s"} from the selection.`);
+  };
+
+  const dismissSelection = () => {
+    setSelection(null);
+    setActivity("Selection dismissed.");
+  };
+
   return (
     <main className="app-shell">
       <header className="masthead">
@@ -632,7 +824,7 @@ function App() {
         {showInfo ? (
           <aside className="info-card">
             <button type="button" aria-label="Hide instructions" onClick={() => setShowInfo(false)}>×</button>
-            <p>Left-drag to draw. Right-drag, middle-drag, or hold Space to move. On touch, choose Hand to move.</p>
+            <p>Draw with Pencil, or drag a rectangle with Lasso. Use Hand to pan and pinch to zoom on touch screens.</p>
           </aside>
         ) : (
           <button className="show-info" type="button" onClick={() => setShowInfo(true)}>Show info</button>
@@ -674,7 +866,7 @@ function App() {
           <fieldset className="mode-control">
             <legend>Tool</legend>
             <div className="segmented-control">
-              {(["paint", "erase", "pan"] as Tool[]).map((mode) => (
+              {(["paint", "erase", "pan", "lasso"] as Tool[]).map((mode) => (
                 <button
                   key={mode}
                   className={tool === mode ? "segment segment--active" : "segment"}
@@ -682,7 +874,7 @@ function App() {
                   aria-pressed={tool === mode}
                   onClick={() => setTool(mode)}
                 >
-                  {mode === "paint" ? "Pencil" : mode === "erase" ? "Eraser" : "Hand"}
+                  {mode === "paint" ? "Pencil" : mode === "erase" ? "Eraser" : mode === "pan" ? "Hand" : "Lasso"}
                 </button>
               ))}
             </div>
@@ -734,6 +926,56 @@ function App() {
               }
             }}
           />
+          {selectionScreen && selectionActionsStyle ? (
+            <>
+              <div
+                className="selection-outline"
+                style={{
+                  left: selectionScreen.left,
+                  top: selectionScreen.top,
+                  width: selectionScreen.width,
+                  height: selectionScreen.height,
+                }}
+                aria-hidden="true"
+              />
+              <div className="selection-actions" style={selectionActionsStyle} aria-label="Selection actions">
+                <button type="button" onClick={clearSelection} aria-label="Clear selected pixels" title="Clear selected pixels">
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M3.5 4.5h9M6 4.5v-2h4v2m1.5 0-.6 9h-5.8l-.6-9M7 7v4M9 7v4" />
+                  </svg>
+                </button>
+                <button
+                  className="selection-action--placeholder"
+                  type="button"
+                  onClick={dismissSelection}
+                  aria-label="Copy selection (coming soon)"
+                  title="Copy coming soon"
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <rect x="5.5" y="5.5" width="7" height="7" />
+                    <path d="M3.5 10.5h-1v-8h8v1" />
+                  </svg>
+                </button>
+                <button
+                  className="selection-action--placeholder"
+                  type="button"
+                  onClick={dismissSelection}
+                  aria-label="Export selection (coming soon)"
+                  title="Export coming soon"
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M8 2v8m-3-3 3 3 3-3M3 11v2.5h10V11" />
+                  </svg>
+                </button>
+                <span className="selection-action-separator" aria-hidden="true" />
+                <button type="button" onClick={dismissSelection} aria-label="Dismiss selection" title="Dismiss selection">
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="m4 4 8 8m0-8-8 8" />
+                  </svg>
+                </button>
+              </div>
+            </>
+          ) : null}
           <footer className="canvas-meta">
             <span>{Math.round(viewport.x)}, {Math.round(viewport.y)}</span>
             <span className="sr-only" aria-live="polite">{activity}</span>

@@ -339,7 +339,8 @@ legend {
 }
 
 .pixel-canvas--paint,
-.pixel-canvas--erase {
+.pixel-canvas--erase,
+.pixel-canvas--lasso {
   cursor: crosshair;
 }
 
@@ -354,6 +355,66 @@ legend {
 .pixel-canvas:focus-visible {
   outline: 3px solid #327be8;
   outline-offset: -3px;
+}
+
+.selection-outline {
+  position: absolute;
+  z-index: 2;
+  border: 2px solid #ef5938;
+  background: rgba(239, 89, 56, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(250, 250, 247, 0.8), 0 0 0 1px rgba(26, 27, 25, 0.38);
+  pointer-events: none;
+}
+
+.selection-actions {
+  position: absolute;
+  z-index: 3;
+  display: grid;
+  width: 139px;
+  height: 32px;
+  grid-template-columns: repeat(3, 1fr) 1px 28px;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid #30322f;
+  background: rgba(25, 26, 24, 0.96);
+  box-shadow: 4px 4px 0 rgba(23, 25, 22, 0.12);
+}
+
+.selection-actions button {
+  display: grid;
+  min-width: 0;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #5c5f59;
+  border-radius: 0;
+  color: #f7f7f3;
+  background: transparent;
+  cursor: pointer;
+}
+
+.selection-actions button:first-child {
+  color: #ff876f;
+}
+
+.selection-actions .selection-action--placeholder {
+  color: #777a74;
+}
+
+.selection-action-separator {
+  width: 1px;
+  height: 16px;
+  align-self: center;
+  background: #5c5f59;
+}
+
+.selection-actions svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: square;
+  stroke-linejoin: miter;
+  stroke-width: 1.3;
 }
 
 .canvas-meta {
@@ -382,7 +443,7 @@ legend {
   border: 0;
 }
 
-@media (max-width: 620px) {
+@media (max-width: 1024px) {
   .masthead {
     right: 12px;
     left: 12px;
@@ -395,33 +456,39 @@ legend {
 
   .info-card,
   .show-info {
-    top: 72px;
-    left: 12px;
-  }
-
-  .info-card {
-    width: min(280px, calc(100vw - 24px));
+    display: none;
   }
 
   .toolbar {
     top: auto;
-    right: 12px;
-    bottom: 12px;
-    left: 12px;
+    right: auto;
+    bottom: max(12px, env(safe-area-inset-bottom));
+    left: 50%;
     display: grid;
-    width: auto;
+    width: min(620px, calc(100% - 24px));
     max-height: none;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 12px;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: 8px;
     overflow: visible;
-    padding: 14px;
+    padding: 10px;
+    transform: translateX(-50%);
+  }
+
+  .toolbar legend {
+    display: none;
   }
 
   .color-control,
-  .mode-control,
-  .zoom-control,
-  .clear-button {
+  .mode-control {
     grid-column: 1 / -1;
+  }
+
+  .zoom-control {
+    grid-column: 1 / 10;
+  }
+
+  .clear-button {
+    grid-column: 10 / -1;
   }
 
   .palette {
@@ -429,10 +496,16 @@ legend {
     gap: 5px;
   }
 
+  .swatch,
+  .custom-color {
+    height: 26px;
+    aspect-ratio: auto;
+  }
+
   .segmented-control,
   .zoom-buttons,
   .clear-button {
-    height: 31px;
+    height: 30px;
     align-self: end;
   }
 
@@ -441,7 +514,7 @@ legend {
   }
 }
 
-@media (max-height: 670px) and (min-width: 621px) {
+@media (max-height: 670px) and (min-width: 1025px) {
   .toolbar {
     top: 175px;
     gap: 13px;
