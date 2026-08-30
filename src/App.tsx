@@ -21,6 +21,8 @@ const MAX_EXPORT_SCALE = 64;
 const MAX_EXPORT_DIMENSION = 4096;
 const HISTORY_LIMIT = 100;
 const MAX_FILL_PIXELS = 50_000;
+const MAX_CUSTOM_COLORS = 8;
+const MAX_RECENT_COLORS = 6;
 const COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
 const PALETTE = [
   "#161616",
@@ -60,6 +62,8 @@ type PersistedEditorState = {
   pixels: Map<string, string>;
   viewport: Viewport;
   selectedColor: string;
+  customColors: string[];
+  recentColors: string[];
 };
 type PointerState =
   | { kind: "draw"; lastPixel: { x: number; y: number }; historyGroup: number }
@@ -228,11 +232,25 @@ function getPinchMetrics(points: Map<number, ScreenPoint>) {
   };
 }
 
+function readStoredColors(value: unknown, limit: number) {
+  if (!Array.isArray(value)) return [];
+  const colors: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !COLOR_PATTERN.test(entry)) continue;
+    const color = entry.toLowerCase();
+    if (!colors.includes(color)) colors.push(color);
+    if (colors.length === limit) break;
+  }
+  return colors;
+}
+
 function loadPersistedState(): PersistedEditorState {
-  const fallback = {
+  const fallback: PersistedEditorState = {
     pixels: new Map<string, string>(),
     viewport: { x: 0, y: 0, zoom: DEFAULT_ZOOM },
     selectedColor: PALETTE[0],
+    customColors: [],
+    recentColors: [],
   };
 
   try {
@@ -265,8 +283,15 @@ function loadPersistedState(): PersistedEditorState {
       typeof saved.selectedColor === "string" && COLOR_PATTERN.test(saved.selectedColor)
         ? saved.selectedColor.toLowerCase()
         : fallback.selectedColor;
+    let customColors = readStoredColors(saved.customColors, MAX_CUSTOM_COLORS).filter(
+      (color) => !PALETTE.includes(color),
+    );
+    if (!PALETTE.includes(selectedColor) && !customColors.includes(selectedColor)) {
+      customColors = [selectedColor, ...customColors].slice(0, MAX_CUSTOM_COLORS);
+    }
+    const recentColors = readStoredColors(saved.recentColors, MAX_RECENT_COLORS);
 
-    return { pixels, viewport, selectedColor };
+    return { pixels, viewport, selectedColor, customColors, recentColors };
   } catch (error) {
     console.warn("Could not restore the saved MCPixels canvas", error);
     return fallback;
@@ -308,6 +333,8 @@ function App() {
   });
   const pixels = pixelHistory.pixels;
   const [selectedColor, setSelectedColor] = useState(initialState.selectedColor);
+  const [customColors, setCustomColors] = useState(initialState.customColors);
+  const [recentColors, setRecentColors] = useState(initialState.recentColors);
   const [tool, setTool] = useState<Tool>("paint");
   const [viewport, setViewport] = useState<Viewport>(initialState.viewport);
   const [canvasSize, setCanvasSize] = useState({ width: 1, height: 1 });
@@ -344,7 +371,7 @@ function App() {
         });
         localStorage.setItem(
           STORAGE_KEY,
-          JSON.stringify({ version: 1, pixels: savedPixels, viewport, selectedColor }),
+          JSON.stringify({ version: 1, pixels: savedPixels, viewport, selectedColor, customColors, recentColors }),
         );
       } catch (error) {
         console.warn("Could not save the MCPixels canvas", error);
@@ -357,7 +384,7 @@ function App() {
       window.clearTimeout(timeout);
       window.removeEventListener("pagehide", save);
     };
-  }, [pixels, selectedColor, viewport]);
+  }, [customColors, pixels, recentColors, selectedColor, viewport]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -531,6 +558,15 @@ function App() {
     else setActivity("That area already uses the selected color.");
   };
 
+  const selectEditorColor = (value: string, saveAsCustom = false) => {
+    const color = value.toLowerCase();
+    setSelectedColor(color);
+    setRecentColors((current) => [color, ...current.filter((entry) => entry !== color)].slice(0, MAX_RECENT_COLORS));
+    if (saveAsCustom && !PALETTE.includes(color)) {
+      setCustomColors((current) => [color, ...current.filter((entry) => entry !== color)].slice(0, MAX_CUSTOM_COLORS));
+    }
+  };
+
   const pickColorAt = (clientX: number, clientY: number) => {
     const pixel = getPixelAt(clientX, clientY);
     if (!pixel) return;
@@ -539,7 +575,7 @@ function App() {
       setActivity("There is no color at that pixel to pick.");
       return;
     }
-    setSelectedColor(color);
+    selectEditorColor(color, true);
     setTool(toolBeforePickerRef.current);
     setActivity(`Picked ${color} from pixel (${pixel.x}, ${pixel.y}).`);
   };
@@ -1213,8 +1249,26 @@ function App() {
         <div className="toolbar" aria-label="Drawing controls">
           <fieldset className="color-control">
             <legend>Color</legend>
+            {recentColors.length > 0 ? (
+              <div className="recent-colors" role="group" aria-label="Recently used colors">
+                {recentColors.map((color) => (
+                  <button
+                    key={color}
+                    className={selectedColor === color ? "recent-swatch recent-swatch--active" : "recent-swatch"}
+                    style={{ "--swatch": color } as CSSProperties}
+                    type="button"
+                    aria-label={`Use recent color ${color}`}
+                    aria-pressed={selectedColor === color}
+                    onClick={() => {
+                      selectEditorColor(color);
+                      if (tool !== "fill") setTool("paint");
+                    }}
+                  />
+                ))}
+              </div>
+            ) : null}
             <div className="palette">
-              {PALETTE.map((color) => (
+              {[...PALETTE, ...customColors].map((color) => (
                 <button
                   key={color}
                   className={(tool === "paint" || tool === "fill") && selectedColor === color ? "swatch swatch--active" : "swatch"}
@@ -1223,7 +1277,7 @@ function App() {
                   aria-label={`Use color ${color}`}
                   aria-pressed={(tool === "paint" || tool === "fill") && selectedColor === color}
                   onClick={() => {
-                    setSelectedColor(color);
+                    selectEditorColor(color);
                     if (tool !== "fill") setTool("paint");
                   }}
                 />
@@ -1235,7 +1289,7 @@ function App() {
                   value={selectedColor}
                   aria-label="Choose a custom color"
                   onChange={(event) => {
-                    setSelectedColor(event.target.value);
+                    selectEditorColor(event.target.value, true);
                     if (tool !== "fill") setTool("paint");
                   }}
                 />
