@@ -13,6 +13,7 @@ const DRAG_THRESHOLD = 5;
 const MAX_TOOL_COORDINATE = 1_000_000;
 const STORAGE_KEY = "mcpixels.editor.v1";
 const SELECTION_ACTIONS_WIDTH = 139;
+const SELECTION_ACTIONS_WITH_PASTE_WIDTH = 172;
 const SELECTION_ACTIONS_HEIGHT = 32;
 const SELECTION_ACTIONS_GAP = 8;
 const COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
@@ -34,6 +35,7 @@ type PixelAction =
   | { type: "clear" };
 type Viewport = { x: number; y: number; zoom: number };
 type SelectionBounds = { minX: number; minY: number; maxX: number; maxY: number };
+type CopiedSelection = { pixels: PixelChange[]; width: number; height: number };
 type ScreenPoint = { x: number; y: number };
 type Tool = "paint" | "erase" | "pan" | "lasso";
 type PersistedEditorState = {
@@ -188,6 +190,7 @@ function App() {
   const [webMcpStatus, setWebMcpStatus] = useState<"checking" | "ready" | "unavailable" | "error">("checking");
   const [isPanning, setIsPanning] = useState(false);
   const [selection, setSelection] = useState<SelectionBounds | null>(null);
+  const [copiedSelection, setCopiedSelection] = useState<CopiedSelection | null>(null);
   const [showInfo, setShowInfo] = useState(true);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pixelsRef = useRef(pixels);
@@ -771,11 +774,12 @@ function App() {
         height: (selection.maxY - selection.minY + 1) * viewport.zoom,
       }
     : null;
+  const selectionActionsWidth = copiedSelection ? SELECTION_ACTIONS_WITH_PASTE_WIDTH : SELECTION_ACTIONS_WIDTH;
   const selectionActionsStyle = selectionScreen
     ? {
         left: Math.min(
-          Math.max(SELECTION_ACTIONS_GAP, selectionScreen.left + selectionScreen.width - SELECTION_ACTIONS_WIDTH),
-          Math.max(SELECTION_ACTIONS_GAP, canvasSize.width - SELECTION_ACTIONS_WIDTH - SELECTION_ACTIONS_GAP),
+          Math.max(SELECTION_ACTIONS_GAP, selectionScreen.left + selectionScreen.width - selectionActionsWidth),
+          Math.max(SELECTION_ACTIONS_GAP, canvasSize.width - selectionActionsWidth - SELECTION_ACTIONS_GAP),
         ),
         top: Math.min(
           Math.max(
@@ -801,6 +805,34 @@ function App() {
     dispatch({ type: "clear-area", bounds: selection });
     setSelection(null);
     setActivity(`Cleared ${cleared} pixel${cleared === 1 ? "" : "s"} from the selection.`);
+  };
+
+  const copySelection = () => {
+    if (!selection) return;
+    const copiedPixels: PixelChange[] = [];
+    for (const [key, color] of pixelsRef.current) {
+      const [x, y] = key.split(",").map(Number);
+      if (x >= selection.minX && x <= selection.maxX && y >= selection.minY && y <= selection.maxY) {
+        copiedPixels.push({ x: x - selection.minX, y: y - selection.minY, color });
+      }
+    }
+    const width = selection.maxX - selection.minX + 1;
+    const height = selection.maxY - selection.minY + 1;
+    setCopiedSelection({ pixels: copiedPixels, width, height });
+    setSelection(null);
+    setActivity(`Copied ${copiedPixels.length} pixel${copiedPixels.length === 1 ? "" : "s"} from a ${width} by ${height} selection.`);
+  };
+
+  const pasteSelection = () => {
+    if (!selection || !copiedSelection) return;
+    const changes = copiedSelection.pixels.map(({ x, y, color }) => ({
+      x: selection.minX + x,
+      y: selection.minY + y,
+      color,
+    }));
+    if (changes.length > 0) dispatch({ type: "paint", changes });
+    setSelection(null);
+    setActivity(`Pasted ${changes.length} pixel${changes.length === 1 ? "" : "s"} from a ${copiedSelection.width} by ${copiedSelection.height} copy.`);
   };
 
   const dismissSelection = () => {
@@ -938,24 +970,34 @@ function App() {
                 }}
                 aria-hidden="true"
               />
-              <div className="selection-actions" style={selectionActionsStyle} aria-label="Selection actions">
+              <div
+                className={`selection-actions${copiedSelection ? " selection-actions--with-paste" : ""}`}
+                style={selectionActionsStyle}
+                aria-label="Selection actions"
+              >
                 <button type="button" onClick={clearSelection} aria-label="Clear selected pixels" title="Clear selected pixels">
                   <svg viewBox="0 0 16 16" aria-hidden="true">
                     <path d="M3.5 4.5h9M6 4.5v-2h4v2m1.5 0-.6 9h-5.8l-.6-9M7 7v4M9 7v4" />
                   </svg>
                 </button>
                 <button
-                  className="selection-action--placeholder"
                   type="button"
-                  onClick={dismissSelection}
-                  aria-label="Copy selection (coming soon)"
-                  title="Copy coming soon"
+                  onClick={copySelection}
+                  aria-label="Copy selected pixels"
+                  title="Copy selected pixels"
                 >
                   <svg viewBox="0 0 16 16" aria-hidden="true">
                     <rect x="5.5" y="5.5" width="7" height="7" />
                     <path d="M3.5 10.5h-1v-8h8v1" />
                   </svg>
                 </button>
+                {copiedSelection ? (
+                  <button type="button" onClick={pasteSelection} aria-label="Paste copied pixels" title="Paste copied pixels">
+                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                      <path d="M5 4V2.5h6V4m-7 0h8v9H4zM8 6v5m-2-2 2 2 2-2" />
+                    </svg>
+                  </button>
+                ) : null}
                 <button
                   className="selection-action--placeholder"
                   type="button"

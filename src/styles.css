@@ -380,6 +380,11 @@ legend {
   box-shadow: 4px 4px 0 rgba(23, 25, 22, 0.12);
 }
 
+.selection-actions--with-paste {
+  width: 172px;
+  grid-template-columns: repeat(4, 1fr) 1px 28px;
+}
+
 .selection-actions button {
   display: grid;
   min-width: 0;

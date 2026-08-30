@@ -1,6 +1,6 @@
 # MCPixels
 
-A small unbounded pixel editor that a person and an AI agent can edit on the same live page. Draw with Pencil, erase with Eraser, or drag a rectangular selection with Lasso. Right-drag, middle-drag, Space-drag, or use Hand to pan. Hand also supports two-finger pinch zoom on touch screens.
+A small unbounded pixel editor that a person and an AI agent can edit on the same live page. Draw with Pencil, erase with Eraser, or use Lasso to clear and copy rectangular selections. Copied pixels can be pasted at the top-left of a new selection. Right-drag, middle-drag, Space-drag, or use Hand to pan. Hand also supports two-finger pinch zoom on touch screens.
 
 ## Run locally
 
