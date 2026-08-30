@@ -1,16 +1,22 @@
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
 } from "react";
 
 const EMPTY_PIXEL = "transparent";
-const MIN_ZOOM = 4;
-const MAX_ZOOM = 48;
+const EMPTY_CELL = 0;
+const CANVAS_SIZE = 1024;
+const CANVAS_MIN = -CANVAS_SIZE / 2;
+const CANVAS_MAX = CANVAS_SIZE / 2 - 1;
+const MIN_ZOOM = 0.1;
+const GRID_LINE_ZOOM = 8;
+const MAX_ZOOM = 64;
 const DEFAULT_ZOOM = 22;
 const DRAG_THRESHOLD = 5;
-const MAX_TOOL_COORDINATE = 1_000_000;
 const STORAGE_KEY = "mcpixels.editor.v1";
+const STORAGE_VERSION = 2;
+const MAX_STORED_BYTES = 1_200_000;
 const SELECTION_ACTIONS_WIDTH = 273;
 const SELECTION_ACTIONS_WITH_PASTE_WIDTH = 306;
 const SELECTION_ACTIONS_HEIGHT = 32;
@@ -25,7 +31,7 @@ const IMPORT_MATCH_TOLERANCE = 16;
 const MIN_IMPORT_CELL_SIZE = 2;
 const IMPORT_EDGE_CELL_BIAS = 0.15;
 const HISTORY_LIMIT = 100;
-const MAX_FILL_PIXELS = 50_000;
+const HISTORY_CELL_LIMIT = 2_000_000;
 const MAX_SHAPE_PIXELS = 50_000;
 const MAX_CUSTOM_COLORS = 8;
 const COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
@@ -48,12 +54,13 @@ type PixelAction =
   | { type: "clear" }
   | { type: "undo" }
   | { type: "redo" };
-type PixelHistory = {
-  pixels: Map<string, string>;
-  undoStack: Map<string, string>[];
-  redoStack: Map<string, string>[];
+type PixelPatch = {
+  indices: number[];
+  before: number[];
+  after: number[];
   historyGroup: number | null;
 };
+type HistoryState = { version: number; undoDepth: number; redoDepth: number };
 type Viewport = { x: number; y: number; zoom: number };
 type SelectionBounds = { minX: number; minY: number; maxX: number; maxY: number };
 type CopiedSelection = { pixels: PixelChange[]; width: number; height: number };
@@ -80,10 +87,10 @@ type ImportSource = ImportGrid & {
 };
 type FillResult = {
   changes: PixelChange[];
-  reason?: "same-color" | "open-area" | "too-large";
+  reason?: "same-color" | "off-canvas";
 };
 type PersistedEditorState = {
-  pixels: Map<string, string>;
+  cells: Uint32Array;
   viewport: Viewport;
   selectedColor: string;
   customColors: string[];
@@ -122,7 +129,29 @@ type PointerState =
     }
   | null;
 
-const pixelKey = (x: number, y: number) => `${x},${y}`;
+const isOnCanvas = (x: number, y: number) =>
+  x >= CANVAS_MIN && x <= CANVAS_MAX && y >= CANVAS_MIN && y <= CANVAS_MAX;
+
+const cellIndex = (x: number, y: number) => (y - CANVAS_MIN) * CANVAS_SIZE + (x - CANVAS_MIN);
+
+const cellX = (index: number) => (index % CANVAS_SIZE) + CANVAS_MIN;
+
+const cellY = (index: number) => Math.floor(index / CANVAS_SIZE) + CANVAS_MIN;
+
+const cellFromColor = (color: string) => (0xff000000 | parseInt(color.slice(1), 16)) >>> 0;
+
+const colorFromCell = (cell: number) => `#${((cell & 0xffffff) | 0x1000000).toString(16).slice(1)}`;
+
+const clampToCanvas = (value: number) => Math.max(CANVAS_MIN, Math.min(CANVAS_MAX, value));
+
+function clampSelectionToCanvas(bounds: SelectionBounds): SelectionBounds {
+  return {
+    minX: clampToCanvas(bounds.minX),
+    minY: clampToCanvas(bounds.minY),
+    maxX: clampToCanvas(bounds.maxX),
+    maxY: clampToCanvas(bounds.maxY),
+  };
+}
 
 const TOOL_SHORTCUTS: Record<string, Tool> = {
   b: "paint",
@@ -144,94 +173,155 @@ function isShapeTool(tool: Tool): tool is ShapeTool {
   return tool === "line" || tool === "rectangle" || tool === "ellipse";
 }
 
-function pixelReducer(state: PixelHistory, action: PixelAction): PixelHistory {
+type PixelStore = {
+  cells: Uint32Array;
+  undoStack: PixelPatch[];
+  redoStack: PixelPatch[];
+  cellCount: number;
+};
+
+function createPixelStore(cells: Uint32Array): PixelStore {
+  return { cells, undoStack: [], redoStack: [], cellCount: 0 };
+}
+
+function recordCell(patch: PixelPatch, index: number, before: number, after: number) {
+  patch.indices.push(index);
+  patch.before.push(before);
+  patch.after.push(after);
+}
+
+function trimHistory(store: PixelStore) {
+  while (store.undoStack.length > HISTORY_LIMIT || (store.cellCount > HISTORY_CELL_LIMIT && store.undoStack.length > 1)) {
+    const dropped = store.undoStack.shift();
+    if (!dropped) return;
+    store.cellCount -= dropped.indices.length;
+  }
+}
+
+function writeCell(store: PixelStore, patch: PixelPatch, x: number, y: number, value: number) {
+  if (!isOnCanvas(x, y)) return;
+  const index = cellIndex(x, y);
+  const before = store.cells[index];
+  if (before === value) return;
+  store.cells[index] = value;
+  recordCell(patch, index, before, value);
+}
+
+function clearArea(store: PixelStore, patch: PixelPatch, bounds: SelectionBounds) {
+  const area = clampSelectionToCanvas(bounds);
+  for (let y = area.minY; y <= area.maxY; y += 1) {
+    for (let x = area.minX; x <= area.maxX; x += 1) {
+      writeCell(store, patch, x, y, EMPTY_CELL);
+    }
+  }
+}
+
+function applyPixelChanges(store: PixelStore, patch: PixelPatch, changes: PixelChange[]) {
+  for (const { x, y, color } of changes) {
+    writeCell(store, patch, x, y, color === EMPTY_PIXEL ? EMPTY_CELL : cellFromColor(color));
+  }
+}
+
+function applyPixelAction(store: PixelStore, action: PixelAction) {
   if (action.type === "undo") {
-    const pixels = state.undoStack.at(-1);
-    if (!pixels) return state;
-    return {
-      pixels,
-      undoStack: state.undoStack.slice(0, -1),
-      redoStack: [...state.redoStack, state.pixels].slice(-HISTORY_LIMIT),
-      historyGroup: null,
-    };
+    const patch = store.undoStack.pop();
+    if (!patch) return false;
+    for (let entry = patch.indices.length - 1; entry >= 0; entry -= 1) {
+      store.cells[patch.indices[entry]] = patch.before[entry];
+    }
+    store.redoStack.push(patch);
+    return true;
   }
 
   if (action.type === "redo") {
-    const pixels = state.redoStack.at(-1);
-    if (!pixels) return state;
-    return {
-      pixels,
-      undoStack: [...state.undoStack, state.pixels].slice(-HISTORY_LIMIT),
-      redoStack: state.redoStack.slice(0, -1),
-      historyGroup: null,
-    };
+    const patch = store.redoStack.pop();
+    if (!patch) return false;
+    for (let entry = 0; entry < patch.indices.length; entry += 1) {
+      store.cells[patch.indices[entry]] = patch.after[entry];
+    }
+    store.undoStack.push(patch);
+    return true;
   }
 
-  let next: Map<string, string>;
-  let changed = false;
-  if (action.type === "clear") {
-    if (state.pixels.size === 0) return state;
-    next = new Map<string, string>();
-    changed = true;
-  } else if (action.type === "clear-area") {
-    next = new Map(state.pixels);
-    for (const key of state.pixels.keys()) {
-      const [x, y] = key.split(",").map(Number);
-      if (x >= action.bounds.minX && x <= action.bounds.maxX && y >= action.bounds.minY && y <= action.bounds.maxY) {
-        next.delete(key);
-        changed = true;
-      }
-    }
-  } else if (action.type === "move") {
-    next = new Map(state.pixels);
-    for (const key of state.pixels.keys()) {
-      const [x, y] = key.split(",").map(Number);
-      if (x >= action.from.minX && x <= action.from.maxX && y >= action.from.minY && y <= action.from.maxY) {
-        next.delete(key);
-        changed = true;
-      }
-    }
-    for (const { x, y, color } of action.changes) {
-      const key = pixelKey(x, y);
-      if (color === EMPTY_PIXEL) {
-        if (next.delete(key)) changed = true;
-      } else if (next.get(key) !== color) {
-        next.set(key, color);
-        changed = true;
-      }
-    }
-  } else {
-    next = new Map(state.pixels);
-    for (const { x, y, color } of action.changes) {
-      const key = pixelKey(x, y);
-      if (color === EMPTY_PIXEL) {
-        if (next.delete(key)) changed = true;
-      } else if (next.get(key) !== color) {
-        next.set(key, color);
-        changed = true;
-      }
-    }
-  }
-
-  if (!changed) return state;
   const historyGroup = action.type === "paint" ? action.historyGroup ?? null : null;
-  const continuesHistoryGroup = historyGroup !== null && historyGroup === state.historyGroup;
-  return {
-    pixels: next,
-    undoStack: continuesHistoryGroup
-      ? state.undoStack
-      : [...state.undoStack, state.pixels].slice(-HISTORY_LIMIT),
-    redoStack: [],
-    historyGroup,
-  };
+  const open = store.undoStack.at(-1);
+  const continues = historyGroup !== null && open !== undefined && open.historyGroup === historyGroup;
+  const patch: PixelPatch = continues && open ? open : { indices: [], before: [], after: [], historyGroup };
+  const started = patch.indices.length;
+
+  if (action.type === "clear") {
+    for (let index = 0; index < store.cells.length; index += 1) {
+      const before = store.cells[index];
+      if (before === EMPTY_CELL) continue;
+      store.cells[index] = EMPTY_CELL;
+      recordCell(patch, index, before, EMPTY_CELL);
+    }
+  } else if (action.type === "clear-area") {
+    clearArea(store, patch, action.bounds);
+  } else if (action.type === "move") {
+    clearArea(store, patch, action.from);
+    applyPixelChanges(store, patch, action.changes);
+  } else {
+    applyPixelChanges(store, patch, action.changes);
+  }
+
+  const written = patch.indices.length - started;
+  if (written === 0) return false;
+  for (const dropped of store.redoStack) store.cellCount -= dropped.indices.length;
+  store.redoStack.length = 0;
+  store.cellCount += written;
+  if (!continues) store.undoStack.push(patch);
+  trimHistory(store);
+  return true;
+}
+
+function readPaintedPixels(cells: Uint32Array) {
+  const painted: { x: number; y: number; color: string }[] = [];
+  for (let index = 0; index < cells.length; index += 1) {
+    if (cells[index] === EMPTY_CELL) continue;
+    painted.push({ x: cellX(index), y: cellY(index), color: colorFromCell(cells[index]) });
+  }
+  return painted;
+}
+
+function countPaintedCells(cells: Uint32Array, bounds?: SelectionBounds) {
+  let painted = 0;
+  if (!bounds) {
+    for (let index = 0; index < cells.length; index += 1) if (cells[index] !== EMPTY_CELL) painted += 1;
+    return painted;
+  }
+  const area = clampSelectionToCanvas(bounds);
+  for (let y = area.minY; y <= area.maxY; y += 1) {
+    for (let x = area.minX; x <= area.maxX; x += 1) {
+      if (cells[cellIndex(x, y)] !== EMPTY_CELL) painted += 1;
+    }
+  }
+  return painted;
 }
 
 function isCoordinate(value: unknown): value is number {
-  return Number.isSafeInteger(value) && Math.abs(Number(value)) <= MAX_TOOL_COORDINATE;
+  return Number.isSafeInteger(value) && Number(value) >= CANVAS_MIN && Number(value) <= CANVAS_MAX;
 }
 
-function clampZoom(zoom: number) {
-  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
+function clampZoom(zoom: number, minZoom = MIN_ZOOM) {
+  return Math.min(MAX_ZOOM, Math.max(minZoom, zoom));
+}
+
+function fitZoomFor(view: { width: number; height: number }) {
+  return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.min(view.width, view.height) / CANVAS_SIZE));
+}
+
+function clampViewport(viewport: Viewport, view?: { width: number; height: number }): Viewport {
+  const zoom = clampZoom(viewport.zoom, view ? fitZoomFor(view) : MIN_ZOOM);
+  const axis = (value: number, extent: number) => {
+    if (extent > 0 && CANVAS_SIZE * zoom <= extent) return 0;
+    return Math.max(CANVAS_MIN, Math.min(CANVAS_MAX + 1, value));
+  };
+  return {
+    zoom,
+    x: axis(viewport.x, view ? view.width : 0),
+    y: axis(viewport.y, view ? view.height : 0),
+  };
 }
 
 function selectionBounds(from: { x: number; y: number }, to: { x: number; y: number }): SelectionBounds {
@@ -243,60 +333,37 @@ function selectionBounds(from: { x: number; y: number }, to: { x: number; y: num
   };
 }
 
-function floodFill(pixels: Map<string, string>, start: ScreenPoint, color: string): FillResult {
-  const targetColor = pixels.get(pixelKey(start.x, start.y)) ?? EMPTY_PIXEL;
-  if (targetColor === color) return { changes: [], reason: "same-color" };
+function floodFill(cells: Uint32Array, start: ScreenPoint, color: string): FillResult {
+  if (!isOnCanvas(start.x, start.y)) return { changes: [], reason: "off-canvas" };
+  const target = cells[cellIndex(start.x, start.y)];
+  const replacement = cellFromColor(color);
+  if (target === replacement) return { changes: [], reason: "same-color" };
 
-  const queue = [start];
-  const visited = new Set([pixelKey(start.x, start.y)]);
+  const queue = [cellIndex(start.x, start.y)];
+  const visited = new Uint8Array(cells.length);
+  visited[queue[0]] = 1;
   const changes: PixelChange[] = [];
   let queueIndex = 0;
-  let bounds: SelectionBounds | null = null;
-
-  if (targetColor === EMPTY_PIXEL) {
-    if (pixels.size === 0) return { changes: [], reason: "open-area" };
-    for (const key of pixels.keys()) {
-      const [x, y] = key.split(",").map(Number);
-      if (!bounds) bounds = { minX: x, minY: y, maxX: x, maxY: y };
-      else {
-        bounds.minX = Math.min(bounds.minX, x);
-        bounds.minY = Math.min(bounds.minY, y);
-        bounds.maxX = Math.max(bounds.maxX, x);
-        bounds.maxY = Math.max(bounds.maxY, y);
-      }
-    }
-    if (!bounds || start.x < bounds.minX || start.x > bounds.maxX || start.y < bounds.minY || start.y > bounds.maxY) {
-      return { changes: [], reason: "open-area" };
-    }
-  }
 
   while (queueIndex < queue.length) {
-    const point = queue[queueIndex];
+    const index = queue[queueIndex];
     queueIndex += 1;
-    if (
-      targetColor === EMPTY_PIXEL &&
-      bounds &&
-      (point.x <= bounds.minX - 1 || point.x >= bounds.maxX + 1 || point.y <= bounds.minY - 1 || point.y >= bounds.maxY + 1)
-    ) {
-      return { changes: [], reason: "open-area" };
-    }
-
-    changes.push({ ...point, color });
-    if (changes.length > MAX_FILL_PIXELS) return { changes: [], reason: "too-large" };
+    const x = cellX(index);
+    const y = cellY(index);
+    changes.push({ x, y, color });
 
     const neighbors = [
-      { x: point.x - 1, y: point.y },
-      { x: point.x + 1, y: point.y },
-      { x: point.x, y: point.y - 1 },
-      { x: point.x, y: point.y + 1 },
+      { x: x - 1, y },
+      { x: x + 1, y },
+      { x, y: y - 1 },
+      { x, y: y + 1 },
     ];
     for (const neighbor of neighbors) {
-      const key = pixelKey(neighbor.x, neighbor.y);
-      if (visited.has(key)) continue;
-      const neighborColor = pixels.get(key) ?? EMPTY_PIXEL;
-      if (neighborColor !== targetColor) continue;
-      visited.add(key);
-      queue.push(neighbor);
+      if (!isOnCanvas(neighbor.x, neighbor.y)) continue;
+      const neighborIndex = cellIndex(neighbor.x, neighbor.y);
+      if (visited[neighborIndex] || cells[neighborIndex] !== target) continue;
+      visited[neighborIndex] = 1;
+      queue.push(neighborIndex);
     }
   }
 
@@ -324,9 +391,111 @@ function readStoredColors(value: unknown, limit: number) {
   return colors;
 }
 
+function writeVarint(bytes: number[], value: number) {
+  let remaining = value;
+  while (remaining >= 0x80) {
+    bytes.push((remaining & 0x7f) | 0x80);
+    remaining >>>= 7;
+  }
+  bytes.push(remaining);
+}
+
+function readVarint(bytes: Uint8Array, cursor: { at: number }) {
+  let value = 0;
+  let shift = 0;
+  while (cursor.at < bytes.length) {
+    const byte = bytes[cursor.at];
+    cursor.at += 1;
+    value += (byte & 0x7f) * 2 ** shift;
+    if ((byte & 0x80) === 0) return value;
+    shift += 7;
+    if (shift > 35) return null;
+  }
+  return null;
+}
+
+function bytesToBase64(bytes: Uint8Array) {
+  let binary = "";
+  for (let at = 0; at < bytes.length; at += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(text: string) {
+  const binary = atob(text);
+  const bytes = new Uint8Array(binary.length);
+  for (let at = 0; at < binary.length; at += 1) bytes[at] = binary.charCodeAt(at);
+  return bytes;
+}
+
+function encodeCells(cells: Uint32Array) {
+  const palette: string[] = [];
+  const indexes = new Map<number, number>();
+  const bytes: number[] = [];
+  let runCell = cells[0];
+  let runLength = 0;
+
+  const flush = () => {
+    if (runLength === 0) return true;
+    let index = 0;
+    if (runCell !== EMPTY_CELL) {
+      const known = indexes.get(runCell);
+      if (known === undefined) {
+        palette.push(colorFromCell(runCell));
+        index = palette.length;
+        indexes.set(runCell, index);
+      } else {
+        index = known;
+      }
+    }
+    writeVarint(bytes, index);
+    writeVarint(bytes, runLength);
+    return bytes.length <= MAX_STORED_BYTES;
+  };
+
+  for (let at = 0; at < cells.length; at += 1) {
+    if (cells[at] === runCell) {
+      runLength += 1;
+      continue;
+    }
+    if (!flush()) return null;
+    runCell = cells[at];
+    runLength = 1;
+  }
+  if (!flush()) return null;
+  return { palette, runs: bytesToBase64(Uint8Array.from(bytes)) };
+}
+
+function decodeCells(palette: unknown, runs: unknown) {
+  if (!Array.isArray(palette) || typeof runs !== "string") return null;
+  const colors = palette.map((color) =>
+    typeof color === "string" && COLOR_PATTERN.test(color) ? cellFromColor(color.toLowerCase()) : EMPTY_CELL,
+  );
+  let bytes: Uint8Array;
+  try {
+    bytes = base64ToBytes(runs);
+  } catch {
+    return null;
+  }
+  const cells = new Uint32Array(CANVAS_SIZE * CANVAS_SIZE);
+  const cursor = { at: 0 };
+  let filled = 0;
+
+  while (cursor.at < bytes.length) {
+    const index = readVarint(bytes, cursor);
+    const length = readVarint(bytes, cursor);
+    if (index === null || length === null || index > colors.length) return null;
+    if (filled + length > cells.length) return null;
+    if (index > 0) cells.fill(colors[index - 1], filled, filled + length);
+    filled += length;
+  }
+  return filled === cells.length ? cells : null;
+}
+
 function loadPersistedState(): PersistedEditorState {
   const fallback: PersistedEditorState = {
-    pixels: new Map<string, string>(),
+    cells: new Uint32Array(CANVAS_SIZE * CANVAS_SIZE),
     viewport: { x: 0, y: 0, zoom: DEFAULT_ZOOM },
     selectedColor: PALETTE[0],
     customColors: [],
@@ -336,16 +505,21 @@ function loadPersistedState(): PersistedEditorState {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return fallback;
     const saved = JSON.parse(raw) as Record<string, unknown>;
-    if (saved.version !== 1 || !Array.isArray(saved.pixels)) return fallback;
+    let cells: Uint32Array | null = null;
 
-    const pixels = new Map<string, string>();
-    for (const entry of saved.pixels) {
-      if (!Array.isArray(entry) || entry.length !== 3) continue;
-      const [x, y, color] = entry as unknown[];
-      if (isCoordinate(x) && isCoordinate(y) && typeof color === "string" && COLOR_PATTERN.test(color)) {
-        pixels.set(pixelKey(x, y), color.toLowerCase());
+    if (saved.version === STORAGE_VERSION && saved.canvas === CANVAS_SIZE) {
+      cells = decodeCells(saved.palette, saved.runs);
+    } else if (saved.version === 1 && Array.isArray(saved.pixels)) {
+      cells = new Uint32Array(CANVAS_SIZE * CANVAS_SIZE);
+      for (const entry of saved.pixels) {
+        if (!Array.isArray(entry) || entry.length !== 3) continue;
+        const [x, y, color] = entry as unknown[];
+        if (isCoordinate(x) && isCoordinate(y) && typeof color === "string" && COLOR_PATTERN.test(color)) {
+          cells[cellIndex(x, y)] = cellFromColor(color.toLowerCase());
+        }
       }
     }
+    if (!cells) return fallback;
 
     const savedViewport = saved.viewport as Record<string, unknown> | undefined;
     const viewport =
@@ -356,7 +530,7 @@ function loadPersistedState(): PersistedEditorState {
       Number.isFinite(savedViewport.y) &&
       typeof savedViewport.zoom === "number" &&
       Number.isFinite(savedViewport.zoom)
-        ? { x: savedViewport.x, y: savedViewport.y, zoom: clampZoom(savedViewport.zoom) }
+        ? clampViewport({ x: savedViewport.x, y: savedViewport.y, zoom: savedViewport.zoom })
         : fallback.viewport;
     const selectedColor =
       typeof saved.selectedColor === "string" && COLOR_PATTERN.test(saved.selectedColor)
@@ -371,7 +545,7 @@ function loadPersistedState(): PersistedEditorState {
       ...storedCustomColors,
     ].filter((color, index, colors) => colors.indexOf(color) === index).slice(0, MAX_CUSTOM_COLORS);
 
-    return { pixels, viewport, selectedColor, customColors };
+    return { cells, viewport, selectedColor, customColors };
   } catch (error) {
     console.warn("Could not restore the saved MCPixels canvas", error);
     return fallback;
@@ -410,7 +584,7 @@ function applySymmetry(changes: PixelChange[], symmetry: Symmetry, limit = Numbe
     const yCoordinates = symmetry.horizontal ? [change.y, -change.y - 1] : [change.y];
     for (const x of xCoordinates) {
       for (const y of yCoordinates) {
-        mirrored.set(pixelKey(x, y), { x, y, color: change.color });
+        mirrored.set(`${x},${y}`, { x, y, color: change.color });
         if (mirrored.size > limit) return null;
       }
     }
@@ -762,7 +936,7 @@ async function readImportSource(file: File): Promise<ImportSource> {
 
 function importOriginFor(selection: SelectionBounds | null, viewport: Viewport, width: number, height: number) {
   const clamp = (value: number, size: number) =>
-    Math.max(-MAX_TOOL_COORDINATE, Math.min(MAX_TOOL_COORDINATE - size + 1, value));
+    Math.max(CANVAS_MIN, Math.min(CANVAS_MAX - size + 1, value));
   return {
     x: clamp(selection ? selection.minX : Math.round(viewport.x) - Math.floor(width / 2), width),
     y: clamp(selection ? selection.minY : Math.round(viewport.y) - Math.floor(height / 2), height),
@@ -787,13 +961,20 @@ function carriesFiles(transfer: DataTransfer | null) {
 
 function App() {
   const [initialState] = useState(loadPersistedState);
-  const [pixelHistory, dispatch] = useReducer(pixelReducer, {
-    pixels: initialState.pixels,
-    undoStack: [],
-    redoStack: [],
-    historyGroup: null,
-  });
-  const pixels = pixelHistory.pixels;
+  const storeRef = useRef<PixelStore | null>(null);
+  if (storeRef.current === null) storeRef.current = createPixelStore(initialState.cells);
+  const store = storeRef.current;
+  const cells = store.cells;
+  const [history, setHistory] = useState<HistoryState>({ version: 0, undoDepth: 0, redoDepth: 0 });
+
+  const dispatch = (action: PixelAction) => {
+    if (!applyPixelAction(store, action)) return;
+    setHistory((current) => ({
+      version: current.version + 1,
+      undoDepth: store.undoStack.length,
+      redoDepth: store.redoStack.length,
+    }));
+  };
   const [selectedColor, setSelectedColor] = useState(initialState.selectedColor);
   const [customColors, setCustomColors] = useState(initialState.customColors);
   const [tool, setTool] = useState<Tool>("paint");
@@ -822,10 +1003,14 @@ function App() {
   const [importError, setImportError] = useState("");
   const [isReadingImport, setIsReadingImport] = useState(false);
   const [isDropTarget, setIsDropTarget] = useState(false);
+  const [storageError, setStorageError] = useState("");
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
-  const pixelsRef = useRef(pixels);
   const viewportRef = useRef(viewport);
+  const canvasSizeRef = useRef(canvasSize);
+  const gridCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const gridImageRef = useRef<ImageData | null>(null);
+  const encodedCellsRef = useRef<{ version: number; encoded: ReturnType<typeof encodeCells> } | null>(null);
   const pointerRef = useRef<PointerState>(null);
   const historyGroupRef = useRef(0);
   const toolBeforePickerRef = useRef<ColorTool>("paint");
@@ -833,22 +1018,37 @@ function App() {
   const shapePreviewFrameRef = useRef<number | null>(null);
   const spacePressedRef = useRef(false);
   const suppressContextMenuRef = useRef(false);
-  pixelsRef.current = pixels;
   viewportRef.current = viewport;
+  canvasSizeRef.current = canvasSize;
+  const fitZoom = fitZoomFor(canvasSize);
 
   useEffect(() => {
     const save = () => {
+      const cached = encodedCellsRef.current;
+      const encoded = cached && cached.version === history.version ? cached.encoded : encodeCells(cells);
+      encodedCellsRef.current = { version: history.version, encoded };
+      if (!encoded) {
+        setStorageError("This canvas is too detailed to save in this browser. Recent changes will be lost if you reload.");
+        return;
+      }
       try {
-        const savedPixels = Array.from(pixels, ([key, color]) => {
-          const [x, y] = key.split(",").map(Number);
-          return [x, y, color] as const;
-        });
         localStorage.setItem(
           STORAGE_KEY,
-          JSON.stringify({ version: 1, pixels: savedPixels, viewport, selectedColor, customColors }),
+          JSON.stringify({
+            version: STORAGE_VERSION,
+            canvas: CANVAS_SIZE,
+            palette: encoded.palette,
+            runs: encoded.runs,
+            viewport,
+            selectedColor,
+            customColors,
+          }),
         );
+        setStorageError("");
       } catch (error) {
         console.warn("Could not save the MCPixels canvas", error);
+        const size = Math.round(encoded.runs.length / 1024);
+        setStorageError(`This browser refused to store the canvas (${size} KB). Recent changes will be lost if you reload.`);
       }
     };
 
@@ -858,7 +1058,7 @@ function App() {
       window.clearTimeout(timeout);
       window.removeEventListener("pagehide", save);
     };
-  }, [customColors, pixels, selectedColor, viewport]);
+  }, [cells, customColors, history.version, selectedColor, viewport]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -876,6 +1076,13 @@ function App() {
   }, []);
 
   useEffect(() => {
+    setViewport((current) => {
+      const next = clampViewport(current, canvasSize);
+      return next.x === current.x && next.y === current.y && next.zoom === current.zoom ? current : next;
+    });
+  }, [canvasSize]);
+
+  useEffect(() => {
     const panelOpen = showExport || showImport;
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -885,13 +1092,13 @@ function App() {
       const wantsUndo = modifierPressed && key === "z" && !event.shiftKey;
       const wantsRedo = modifierPressed && ((key === "z" && event.shiftKey) || key === "y");
 
-      if (!panelOpen && !isTyping && wantsUndo && pixelHistory.undoStack.length > 0) {
+      if (!panelOpen && !isTyping && wantsUndo && history.undoDepth > 0) {
         event.preventDefault();
         dispatch({ type: "undo" });
         setActivity("Undid the last pixel edit.");
         return;
       }
-      if (!panelOpen && !isTyping && wantsRedo && pixelHistory.redoStack.length > 0) {
+      if (!panelOpen && !isTyping && wantsRedo && history.redoDepth > 0) {
         event.preventDefault();
         dispatch({ type: "redo" });
         setActivity("Redid the last pixel edit.");
@@ -925,7 +1132,7 @@ function App() {
       window.removeEventListener("keyup", handleKeyUp);
       window.removeEventListener("blur", handleBlur);
     };
-  }, [pixelHistory.redoStack.length, pixelHistory.undoStack.length, showExport, showImport, tool]);
+  }, [history.redoDepth, history.undoDepth, showExport, showImport, tool]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -941,7 +1148,8 @@ function App() {
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, width, height);
 
-    const { x: centerX, y: centerY, zoom } = viewport;
+    const { x: centerX, y: centerY } = viewport;
+    const zoom = clampZoom(viewport.zoom, fitZoom);
     const minX = Math.floor(centerX - width / (2 * zoom)) - 1;
     const maxX = Math.ceil(centerX + width / (2 * zoom)) + 1;
     const minY = Math.floor(centerY - height / (2 * zoom)) - 1;
@@ -950,24 +1158,60 @@ function App() {
     const screenY = (y: number) => (y - centerY) * zoom + height / 2;
 
     context.imageSmoothingEnabled = false;
-    context.fillStyle = "#fafaf7";
+    context.fillStyle = "#eceae2";
     context.fillRect(0, 0, width, height);
 
+    const paperLeft = screenX(CANVAS_MIN);
+    const paperTop = screenY(CANVAS_MIN);
+    context.fillStyle = "#fafaf7";
+    context.fillRect(paperLeft, paperTop, CANVAS_SIZE * zoom, CANVAS_SIZE * zoom);
+
+    const firstX = Math.max(CANVAS_MIN, minX);
+    const lastX = Math.min(CANVAS_MAX, maxX);
+    const firstY = Math.max(CANVAS_MIN, minY);
+    const lastY = Math.min(CANVAS_MAX, maxY);
     const movingFrom = movingSelection?.originalBounds ?? null;
-    for (const [key, color] of pixels) {
-      const [x, y] = key.split(",").map(Number);
-      if (x < minX || x > maxX || y < minY || y > maxY) continue;
-      if (
-        movingFrom &&
-        x >= movingFrom.minX &&
-        x <= movingFrom.maxX &&
-        y >= movingFrom.minY &&
-        y <= movingFrom.maxY
-      ) {
-        continue;
+    const columns = lastX - firstX + 1;
+    const rows = lastY - firstY + 1;
+
+    if (columns > 0 && rows > 0) {
+      let offscreen = gridCanvasRef.current;
+      if (!offscreen) {
+        offscreen = document.createElement("canvas");
+        gridCanvasRef.current = offscreen;
       }
-      context.fillStyle = color;
-      context.fillRect(screenX(x), screenY(y), zoom, zoom);
+      if (offscreen.width !== columns || offscreen.height !== rows) {
+        offscreen.width = columns;
+        offscreen.height = rows;
+        gridImageRef.current = null;
+      }
+      const offscreenContext = offscreen.getContext("2d");
+      if (offscreenContext) {
+        let image = gridImageRef.current;
+        if (!image) {
+          image = offscreenContext.createImageData(columns, rows);
+          gridImageRef.current = image;
+        }
+        const painted = image.data;
+        painted.fill(0);
+        for (let y = firstY; y <= lastY; y += 1) {
+          const rowStart = (y - CANVAS_MIN) * CANVAS_SIZE - CANVAS_MIN;
+          const target = (y - firstY) * columns - firstX;
+          const skipRow = movingFrom !== null && y >= movingFrom.minY && y <= movingFrom.maxY;
+          for (let x = firstX; x <= lastX; x += 1) {
+            const cell = cells[rowStart + x];
+            if (cell === EMPTY_CELL) continue;
+            if (skipRow && movingFrom && x >= movingFrom.minX && x <= movingFrom.maxX) continue;
+            const offset = (target + x) * 4;
+            painted[offset] = (cell >>> 16) & 255;
+            painted[offset + 1] = (cell >>> 8) & 255;
+            painted[offset + 2] = cell & 255;
+            painted[offset + 3] = 255;
+          }
+        }
+        offscreenContext.putImageData(image, 0, 0);
+        context.drawImage(offscreen, screenX(firstX), screenY(firstY), columns * zoom, rows * zoom);
+      }
     }
 
     if (movingSelection && selection) {
@@ -988,20 +1232,22 @@ function App() {
     }
     context.globalAlpha = 1;
 
+    if (zoom >= GRID_LINE_ZOOM) {
     context.beginPath();
     context.strokeStyle = "#d5d7d2";
     context.lineWidth = 1;
-    for (let x = minX; x <= maxX + 1; x += 1) {
+    for (let x = firstX; x <= lastX + 1; x += 1) {
       const position = Math.round(screenX(x)) + 0.5;
-      context.moveTo(position, 0);
-      context.lineTo(position, height);
+      context.moveTo(position, Math.max(0, paperTop));
+      context.lineTo(position, Math.min(height, screenY(CANVAS_MAX + 1)));
     }
-    for (let y = minY; y <= maxY + 1; y += 1) {
+    for (let y = firstY; y <= lastY + 1; y += 1) {
       const position = Math.round(screenY(y)) + 0.5;
-      context.moveTo(0, position);
-      context.lineTo(width, position);
+      context.moveTo(Math.max(0, paperLeft), position);
+      context.lineTo(Math.min(width, screenX(CANVAS_MAX + 1)), position);
     }
     context.stroke();
+    }
 
     context.lineWidth = 1;
     context.beginPath();
@@ -1014,7 +1260,11 @@ function App() {
     context.moveTo(0, screenY(0));
     context.lineTo(width, screenY(0));
     context.stroke();
-  }, [canvasSize, movingSelection, pixels, selection, shapePreview, symmetry, viewport]);
+
+    context.lineWidth = 2;
+    context.strokeStyle = "#9a9d95";
+    context.strokeRect(paperLeft, paperTop, CANVAS_SIZE * zoom, CANVAS_SIZE * zoom);
+  }, [canvasSize, cells, fitZoom, history.version, movingSelection, selection, shapePreview, symmetry, viewport]);
 
   const getCanvasPoint = (clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
@@ -1110,14 +1360,13 @@ function App() {
   const fillAt = (clientX: number, clientY: number) => {
     const pixel = getPixelAt(clientX, clientY);
     if (!pixel) return;
-    const result = floodFill(pixelsRef.current, pixel, selectedColor);
+    const result = floodFill(store.cells, pixel, selectedColor);
     if (result.changes.length > 0) {
       dispatch({ type: "paint", changes: result.changes });
       setActivity(`Filled ${result.changes.length} pixel${result.changes.length === 1 ? "" : "s"}.`);
       return;
     }
-    if (result.reason === "open-area") setActivity("Open empty space cannot be filled on the infinite canvas.");
-    else if (result.reason === "too-large") setActivity(`Fill stopped because it exceeded ${MAX_FILL_PIXELS} pixels.`);
+    if (result.reason === "off-canvas") setActivity("That point is outside the canvas.");
     else setActivity("That area already uses the selected color.");
   };
 
@@ -1132,11 +1381,13 @@ function App() {
   const pickColorAt = (clientX: number, clientY: number) => {
     const pixel = getPixelAt(clientX, clientY);
     if (!pixel) return;
-    const color = pixelsRef.current.get(pixelKey(pixel.x, pixel.y));
-    if (!color) {
+    if (!isOnCanvas(pixel.x, pixel.y)) return;
+    const cell = store.cells[cellIndex(pixel.x, pixel.y)];
+    if (cell === EMPTY_CELL) {
       setActivity("There is no color at that pixel to pick.");
       return;
     }
+    const color = colorFromCell(cell);
     selectEditorColor(color);
     setTool(toolBeforePickerRef.current);
     setActivity(`Picked ${color} from pixel (${pixel.x}, ${pixel.y}).`);
@@ -1146,7 +1397,7 @@ function App() {
     const pixel = getPixelAt(clientX, clientY);
     if (!pixel) return;
     pointerRef.current = { kind: "select", pointerId, anchor: pixel };
-    setSelection(selectionBounds(pixel, pixel));
+    setSelection(clampSelectionToCanvas(selectionBounds(pixel, pixel)));
   };
 
   const isInsideSelection = (pixel: { x: number; y: number }, bounds: SelectionBounds) =>
@@ -1252,14 +1503,14 @@ function App() {
         y: pinch.center.y - bounds.top,
       };
       setViewport((current) => {
-        const zoom = clampZoom(current.zoom * (pinch.distance / pointer.lastDistance));
+        const zoom = clampZoom(current.zoom * (pinch.distance / pointer.lastDistance), fitZoom);
         const worldX = current.x + (previousAnchor.x - canvasSize.width / 2) / current.zoom;
         const worldY = current.y + (previousAnchor.y - canvasSize.height / 2) / current.zoom;
-        return {
+        return clampViewport({
           x: worldX - (nextAnchor.x - canvasSize.width / 2) / zoom,
           y: worldY - (nextAnchor.y - canvasSize.height / 2) / zoom,
           zoom,
-        };
+        }, canvasSize);
       });
       pointerRef.current = {
         kind: "pinch",
@@ -1281,7 +1532,7 @@ function App() {
 
     if (pointer.kind === "select") {
       const pixel = getPixelAt(event.clientX, event.clientY);
-      if (pixel) setSelection(selectionBounds(pointer.anchor, pixel));
+      if (pixel) setSelection(clampSelectionToCanvas(selectionBounds(pointer.anchor, pixel)));
       return;
     }
 
@@ -1315,11 +1566,13 @@ function App() {
     };
     if (!pointer.hasDragged) setIsPanning(true);
     if (pointer.button === 2) suppressContextMenuRef.current = true;
-    setViewport((current) => ({
-      ...current,
-      x: current.x - deltaX / current.zoom,
-      y: current.y - deltaY / current.zoom,
-    }));
+    setViewport((current) =>
+      clampViewport({
+        ...current,
+        x: current.x - deltaX / current.zoom,
+        y: current.y - deltaY / current.zoom,
+      }, canvasSize),
+    );
   };
 
   const handlePointerEnd = (event: ReactPointerEvent<HTMLCanvasElement>, cancelled = false) => {
@@ -1385,7 +1638,7 @@ function App() {
     if (pointerRef.current?.kind === "select") {
       const pixel = getPixelAt(event.clientX, event.clientY);
       if (pixel) {
-        const bounds = selectionBounds(pointerRef.current.anchor, pixel);
+        const bounds = clampSelectionToCanvas(selectionBounds(pointerRef.current.anchor, pixel));
         setSelection(bounds);
         const width = bounds.maxX - bounds.minX + 1;
         const height = bounds.maxY - bounds.minY + 1;
@@ -1415,16 +1668,16 @@ function App() {
 
   const zoomTo = (nextZoom: number, point?: { x: number; y: number }) => {
     setViewport((current) => {
-      const zoom = clampZoom(nextZoom);
+      const zoom = clampZoom(nextZoom, fitZoomFor(canvasSize));
       if (zoom === current.zoom) return current;
       const anchor = point ?? { x: canvasSize.width / 2, y: canvasSize.height / 2 };
       const worldX = current.x + (anchor.x - canvasSize.width / 2) / current.zoom;
       const worldY = current.y + (anchor.y - canvasSize.height / 2) / current.zoom;
-      return {
+      return clampViewport({
         x: worldX - (anchor.x - canvasSize.width / 2) / zoom,
         y: worldY - (anchor.y - canvasSize.height / 2) / zoom,
         zoom,
-      };
+      }, canvasSize);
     });
   };
 
@@ -1438,15 +1691,15 @@ function App() {
       const anchor = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
       const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
       setViewport((current) => {
-        const zoom = clampZoom(current.zoom * factor);
+        const zoom = clampZoom(current.zoom * factor, fitZoomFor(canvasSize));
         if (zoom === current.zoom) return current;
         const worldX = current.x + (anchor.x - canvasSize.width / 2) / current.zoom;
         const worldY = current.y + (anchor.y - canvasSize.height / 2) / current.zoom;
-        return {
+        return clampViewport({
           x: worldX - (anchor.x - canvasSize.width / 2) / zoom,
           y: worldY - (anchor.y - canvasSize.height / 2) / zoom,
           zoom,
-        };
+        }, canvasSize);
       });
     };
 
@@ -1484,8 +1737,8 @@ function App() {
 
     const controller = new AbortController();
     const coordinateProperties = {
-      x: { type: "integer", minimum: -MAX_TOOL_COORDINATE, maximum: MAX_TOOL_COORDINATE },
-      y: { type: "integer", minimum: -MAX_TOOL_COORDINATE, maximum: MAX_TOOL_COORDINATE },
+      x: { type: "integer", minimum: CANVAS_MIN, maximum: CANVAS_MAX },
+      y: { type: "integer", minimum: CANVAS_MIN, maximum: CANVAS_MAX },
     };
     const coordinateSchema = {
       type: "object",
@@ -1500,16 +1753,13 @@ function App() {
           {
             name: "get_sprite",
             title: "Read sprite",
-            description: "Read every colored pixel on the unbounded canvas and the current visible viewport. Coordinates may be negative or positive.",
+            description: `Read every colored pixel on the ${CANVAS_SIZE} by ${CANVAS_SIZE} canvas and the current visible viewport. Coordinates run from ${CANVAS_MIN} to ${CANVAS_MAX} on both axes.`,
             inputSchema: { type: "object", properties: {}, additionalProperties: false },
             annotations: { readOnlyHint: true },
             execute: async () => ({
-              canvas: "unbounded",
+              canvas: { width: CANVAS_SIZE, height: CANVAS_SIZE, minX: CANVAS_MIN, minY: CANVAS_MIN, maxX: CANVAS_MAX, maxY: CANVAS_MAX },
               viewport: viewportRef.current,
-              coloredPixels: Array.from(pixelsRef.current, ([key, color]) => {
-                const [x, y] = key.split(",").map(Number);
-                return { x, y, color };
-              }),
+              coloredPixels: readPaintedPixels(store.cells),
             }),
           },
           { signal: controller.signal },
@@ -1518,7 +1768,7 @@ function App() {
           {
             name: "paint_pixels",
             title: "Paint pixels",
-            description: "Paint pixels anywhere on the unbounded canvas. Coordinates may be negative or positive; colors must be six-digit hex values.",
+            description: `Paint pixels anywhere on the ${CANVAS_SIZE} by ${CANVAS_SIZE} canvas. Coordinates run from ${CANVAS_MIN} to ${CANVAS_MAX} on both axes; colors must be six-digit hex values.`,
             inputSchema: {
               type: "object",
               properties: {
@@ -1548,7 +1798,7 @@ function App() {
                 if (typeof pixel !== "object" || pixel === null) throw new Error("Each pixel must be an object");
                 const { x, y, color } = pixel as Record<string, unknown>;
                 if (!isCoordinate(x) || !isCoordinate(y) || typeof color !== "string" || !COLOR_PATTERN.test(color)) {
-                  throw new Error(`Invalid pixel: ${JSON.stringify(pixel)}`);
+                  throw new Error(`Invalid pixel: ${JSON.stringify(pixel)}. Coordinates run from ${CANVAS_MIN} to ${CANVAS_MAX} and colors must be six-digit hex.`);
                 }
                 return { x, y, color: color.toLowerCase() };
               });
@@ -1563,7 +1813,7 @@ function App() {
           {
             name: "erase_pixels",
             title: "Erase pixels",
-            description: "Erase pixels at negative or positive coordinates on the unbounded canvas.",
+            description: `Erase pixels on the ${CANVAS_SIZE} by ${CANVAS_SIZE} canvas, at coordinates from ${CANVAS_MIN} to ${CANVAS_MAX} on both axes.`,
             inputSchema: {
               type: "object",
               properties: {
@@ -1579,7 +1829,9 @@ function App() {
               const changes = inputPixels.map((pixel) => {
                 if (typeof pixel !== "object" || pixel === null) throw new Error("Each pixel must be an object");
                 const { x, y } = pixel as Record<string, unknown>;
-                if (!isCoordinate(x) || !isCoordinate(y)) throw new Error(`Invalid pixel: ${JSON.stringify(pixel)}`);
+                if (!isCoordinate(x) || !isCoordinate(y)) {
+                  throw new Error(`Invalid pixel: ${JSON.stringify(pixel)}. Coordinates run from ${CANVAS_MIN} to ${CANVAS_MAX}.`);
+                }
                 return { x, y, color: EMPTY_PIXEL };
               });
               dispatch({ type: "paint", changes });
@@ -1593,7 +1845,7 @@ function App() {
           {
             name: "set_canvas_view",
             title: "Move canvas view",
-            description: `Center the visible canvas on a coordinate and set its zoom from ${MIN_ZOOM} to ${MAX_ZOOM} pixels per cell.`,
+            description: `Center the visible canvas on a coordinate from ${CANVAS_MIN} to ${CANVAS_MAX} and set its zoom from ${MIN_ZOOM} to ${MAX_ZOOM} pixels per cell.`,
             inputSchema: {
               type: "object",
               properties: {
@@ -1606,11 +1858,12 @@ function App() {
             },
             execute: async ({ x, y, zoom }) => {
               if (!isCoordinate(x) || !isCoordinate(y) || typeof zoom !== "number" || !Number.isFinite(zoom) || zoom < MIN_ZOOM || zoom > MAX_ZOOM) {
-                throw new Error("Invalid canvas view");
+                throw new Error(`Invalid canvas view. Coordinates run from ${CANVAS_MIN} to ${CANVAS_MAX}.`);
               }
-              setViewport({ x, y, zoom });
-              setActivity(`Agent centered the view at (${x}, ${y}).`);
-              return { success: true, viewport: { x, y, zoom } };
+              const next = clampViewport({ x, y, zoom }, canvasSizeRef.current);
+              setViewport(next);
+              setActivity(`Agent centered the view at (${next.x}, ${next.y}).`);
+              return { success: true, viewport: next };
             },
           },
           { signal: controller.signal },
@@ -1619,10 +1872,10 @@ function App() {
           {
             name: "clear_sprite",
             title: "Clear sprite",
-            description: "Erase every colored pixel from the unbounded canvas.",
+            description: "Erase every colored pixel from the canvas.",
             inputSchema: { type: "object", properties: {}, additionalProperties: false },
             execute: async () => {
-              const cleared = pixelsRef.current.size;
+              const cleared = countPaintedCells(store.cells);
               dispatch({ type: "clear" });
               setActivity("Agent cleared the canvas.");
               return { success: true, cleared };
@@ -1717,13 +1970,7 @@ function App() {
 
   const clearSelection = () => {
     if (!selection) return;
-    let cleared = 0;
-    for (const key of pixelsRef.current.keys()) {
-      const [x, y] = key.split(",").map(Number);
-      if (x >= selection.minX && x <= selection.maxX && y >= selection.minY && y <= selection.maxY) {
-        cleared += 1;
-      }
-    }
+    const cleared = countPaintedCells(store.cells, selection);
     dispatch({ type: "clear-area", bounds: selection });
     setSelection(null);
     setActivity(`Cleared ${cleared} pixel${cleared === 1 ? "" : "s"} from the selection.`);
@@ -1732,10 +1979,12 @@ function App() {
   const captureSelection = () => {
     if (!selection) return null;
     const copiedPixels: PixelChange[] = [];
-    for (const [key, color] of pixelsRef.current) {
-      const [x, y] = key.split(",").map(Number);
-      if (x >= selection.minX && x <= selection.maxX && y >= selection.minY && y <= selection.maxY) {
-        copiedPixels.push({ x: x - selection.minX, y: y - selection.minY, color });
+    const area = clampSelectionToCanvas(selection);
+    for (let y = area.minY; y <= area.maxY; y += 1) {
+      for (let x = area.minX; x <= area.maxX; x += 1) {
+        const cell = store.cells[cellIndex(x, y)];
+        if (cell === EMPTY_CELL) continue;
+        copiedPixels.push({ x: x - selection.minX, y: y - selection.minY, color: colorFromCell(cell) });
       }
     }
     const width = selection.maxX - selection.minX + 1;
@@ -1887,11 +2136,14 @@ function App() {
       const sourceContext = sourceCanvas.getContext("2d");
       if (!sourceContext) throw new Error("Could not create the export canvas");
 
-      for (const [key, color] of pixelsRef.current) {
-        const [x, y] = key.split(",").map(Number);
-        if (x < selection.minX || x > selection.maxX || y < selection.minY || y > selection.maxY) continue;
-        sourceContext.fillStyle = color;
-        sourceContext.fillRect(x - selection.minX, y - selection.minY, 1, 1);
+      const area = clampSelectionToCanvas(selection);
+      for (let y = area.minY; y <= area.maxY; y += 1) {
+        for (let x = area.minX; x <= area.maxX; x += 1) {
+          const cell = store.cells[cellIndex(x, y)];
+          if (cell === EMPTY_CELL) continue;
+          sourceContext.fillStyle = colorFromCell(cell);
+          sourceContext.fillRect(x - selection.minX, y - selection.minY, 1, 1);
+        }
       }
 
       const outputCanvas = document.createElement("canvas");
@@ -2048,13 +2300,13 @@ function App() {
   };
 
   const undoPixels = () => {
-    if (pixelHistory.undoStack.length === 0) return;
+    if (history.undoDepth === 0) return;
     dispatch({ type: "undo" });
     setActivity("Undid the last pixel edit.");
   };
 
   const redoPixels = () => {
-    if (pixelHistory.redoStack.length === 0) return;
+    if (history.redoDepth === 0) return;
     dispatch({ type: "redo" });
     setActivity("Redid the last pixel edit.");
   };
@@ -2065,9 +2317,19 @@ function App() {
         <a className="wordmark" href="/" aria-label="MCPixels home">
           <span className="wordmark-mcp">MCP</span><span className="wordmark-tail">ixels</span>
         </a>
-        <div className={`agent-status agent-status--${webMcpStatus}`}>
-          <span aria-hidden="true" />
-          {statusText}
+        <div className="masthead-status">
+          {storageError ? (
+            <div className="save-warning" role="status" title={storageError}>
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M8 2.5 14.5 13.5h-13zM8 6.5v3.5M8 11.8v.7" />
+              </svg>
+              Not saved
+            </div>
+          ) : null}
+          <div className={`agent-status agent-status--${webMcpStatus}`}>
+            <span aria-hidden="true" />
+            {statusText}
+          </div>
         </div>
       </header>
 
@@ -2213,7 +2475,7 @@ function App() {
             <div className="history-buttons">
               <button
                 type="button"
-                disabled={pixelHistory.undoStack.length === 0}
+                disabled={history.undoDepth === 0}
                 onClick={undoPixels}
                 aria-label="Undo last pixel edit"
                 title="Undo"
@@ -2224,7 +2486,7 @@ function App() {
               </button>
               <button
                 type="button"
-                disabled={pixelHistory.redoStack.length === 0}
+                disabled={history.redoDepth === 0}
                 onClick={redoPixels}
                 aria-label="Redo last pixel edit"
                 title="Redo"
@@ -2317,7 +2579,7 @@ function App() {
           <canvas
             ref={canvasRef}
             className={`pixel-canvas pixel-canvas--${tool}${isPanning ? " pixel-canvas--panning" : ""}${movingSelection ? " pixel-canvas--moving" : ""}`}
-            aria-label="Unbounded pixel canvas. Use Draw, Erase, Fill, Line, Rectangle, Ellipse, Pick color, or Select; enable horizontal or vertical mirroring around the origin axes; right-drag or Space-drag to pan, and use the mouse wheel to zoom."
+            aria-label="Pixel canvas, 1024 by 1024 cells. Use Draw, Erase, Fill, Line, Rectangle, Ellipse, Pick color, or Select; enable horizontal or vertical mirroring around the origin axes; right-drag or Space-drag to pan, and use the mouse wheel to zoom."
             tabIndex={0}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
@@ -2660,7 +2922,7 @@ function App() {
           ) : null}
           <footer className="canvas-meta">
             <span>{Math.round(viewport.x)}, {Math.round(viewport.y)}</span>
-            <span className="sr-only" aria-live="polite">{activity}</span>
+            <span className="sr-only" aria-live="polite">{storageError || activity}</span>
           </footer>
         </div>
       </section>
