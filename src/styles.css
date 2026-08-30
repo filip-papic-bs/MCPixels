@@ -263,6 +263,11 @@ legend {
   padding-left: 4px;
 }
 
+.shape-buttons .shape-style:first-of-type {
+  margin-left: 5px;
+  border-left: 1px solid #5c5f59;
+}
+
 .history-buttons button {
   flex: 1;
 }
@@ -349,7 +354,10 @@ legend {
 
 .pixel-canvas--paint,
 .pixel-canvas--erase,
-.pixel-canvas--select {
+.pixel-canvas--select,
+.pixel-canvas--line,
+.pixel-canvas--rectangle,
+.pixel-canvas--ellipse {
   cursor: crosshair;
 }
 
@@ -677,10 +685,10 @@ legend {
     left: 50%;
     display: grid;
     width: min(620px, calc(100% - 24px));
-    max-height: none;
+    max-height: calc(100vh - 76px);
     grid-template-columns: repeat(12, minmax(0, 1fr));
     gap: 8px;
-    overflow: visible;
+    overflow-y: auto;
     padding: 10px;
     transform: translateX(-50%);
   }
@@ -690,20 +698,25 @@ legend {
   }
 
   .color-control,
-  .mode-control {
+  .mode-control,
+  .shape-control {
     grid-column: 1 / -1;
   }
 
+  .symmetry-control {
+    grid-column: 1 / 7;
+  }
+
   .history-control {
-    grid-column: 1 / 4;
+    grid-column: 7 / -1;
   }
 
   .zoom-control {
-    grid-column: 4 / 10;
+    grid-column: 1 / 9;
   }
 
   .clear-button {
-    grid-column: 10 / -1;
+    grid-column: 9 / -1;
   }
 
   .palette {

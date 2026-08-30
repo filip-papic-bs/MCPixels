@@ -20,6 +20,7 @@ const MAX_EXPORT_SCALE = 64;
 const MAX_EXPORT_DIMENSION = 4096;
 const HISTORY_LIMIT = 100;
 const MAX_FILL_PIXELS = 50_000;
+const MAX_SHAPE_PIXELS = 50_000;
 const MAX_CUSTOM_COLORS = 8;
 const COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
 const PALETTE = [
@@ -50,7 +51,11 @@ type Viewport = { x: number; y: number; zoom: number };
 type SelectionBounds = { minX: number; minY: number; maxX: number; maxY: number };
 type CopiedSelection = { pixels: PixelChange[]; width: number; height: number };
 type ScreenPoint = { x: number; y: number };
-type Tool = "paint" | "erase" | "fill" | "picker" | "pan" | "select";
+type ShapeTool = "line" | "rectangle" | "ellipse";
+type ColorTool = "paint" | "fill" | ShapeTool;
+type Tool = ColorTool | "erase" | "picker" | "pan" | "select";
+type ShapeStyle = "outline" | "filled";
+type Symmetry = { horizontal: boolean; vertical: boolean };
 type ExportMode = "scale" | "dimensions";
 type FillResult = {
   changes: PixelChange[];
@@ -63,11 +68,29 @@ type PersistedEditorState = {
   customColors: string[];
 };
 type PointerState =
-  | { kind: "draw"; lastPixel: { x: number; y: number }; historyGroup: number }
-  | { kind: "select"; anchor: { x: number; y: number } }
+  | {
+      kind: "draw";
+      pointerId: number;
+      lastPixel: ScreenPoint;
+      historyGroup: number;
+      color: string;
+      symmetry: Symmetry;
+    }
+  | {
+      kind: "shape";
+      pointerId: number;
+      anchor: ScreenPoint;
+      current: ScreenPoint;
+      tool: ShapeTool;
+      color: string;
+      style: ShapeStyle;
+      symmetry: Symmetry;
+    }
+  | { kind: "select"; pointerId: number; anchor: { x: number; y: number } }
   | { kind: "pinch"; lastCenter: ScreenPoint; lastDistance: number }
   | {
       kind: "pan";
+      pointerId: number;
       startX: number;
       startY: number;
       lastX: number;
@@ -86,7 +109,18 @@ const TOOL_SHORTCUTS: Record<string, Tool> = {
   i: "picker",
   h: "pan",
   m: "select",
+  l: "line",
+  r: "rectangle",
+  o: "ellipse",
 };
+
+function isColorTool(tool: Tool): tool is ColorTool {
+  return tool === "paint" || tool === "fill" || tool === "line" || tool === "rectangle" || tool === "ellipse";
+}
+
+function isShapeTool(tool: Tool): tool is ShapeTool {
+  return tool === "line" || tool === "rectangle" || tool === "ellipse";
+}
 
 function pixelReducer(state: PixelHistory, action: PixelAction): PixelHistory {
   if (action.type === "undo") {
@@ -329,6 +363,99 @@ function pixelsOnLine(from: { x: number; y: number }, to: { x: number; y: number
   }
 }
 
+function applySymmetry(changes: PixelChange[], symmetry: Symmetry, limit = Number.POSITIVE_INFINITY) {
+  const mirrored = new Map<string, PixelChange>();
+  for (const change of changes) {
+    const xCoordinates = symmetry.vertical ? [change.x, -change.x - 1] : [change.x];
+    const yCoordinates = symmetry.horizontal ? [change.y, -change.y - 1] : [change.y];
+    for (const x of xCoordinates) {
+      for (const y of yCoordinates) {
+        mirrored.set(pixelKey(x, y), { x, y, color: change.color });
+        if (mirrored.size > limit) return null;
+      }
+    }
+  }
+  return Array.from(mirrored.values());
+}
+
+function pixelsInShape(
+  tool: ShapeTool,
+  from: ScreenPoint,
+  to: ScreenPoint,
+  style: ShapeStyle,
+  color: string,
+  symmetry: Symmetry,
+) {
+  if (tool === "line") {
+    const pixelCount = Math.max(Math.abs(to.x - from.x), Math.abs(to.y - from.y)) + 1;
+    if (!Number.isSafeInteger(pixelCount) || pixelCount > MAX_SHAPE_PIXELS) return null;
+    return applySymmetry(pixelsOnLine(from, to, color), symmetry, MAX_SHAPE_PIXELS);
+  }
+
+  const bounds = selectionBounds(from, to);
+  const width = bounds.maxX - bounds.minX + 1;
+  const height = bounds.maxY - bounds.minY + 1;
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)) return null;
+  const changes: PixelChange[] = [];
+
+  if (tool === "rectangle") {
+    const pixelCount = style === "filled"
+      ? width * height
+      : width === 1
+        ? height
+        : height === 1
+          ? width
+          : width * 2 + (height - 2) * 2;
+    if (pixelCount > MAX_SHAPE_PIXELS) return null;
+
+    if (style === "filled") {
+      for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
+        for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
+          changes.push({ x, y, color });
+        }
+      }
+    } else {
+      for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
+        changes.push({ x, y: bounds.minY, color });
+        if (bounds.maxY !== bounds.minY) changes.push({ x, y: bounds.maxY, color });
+      }
+      for (let y = bounds.minY + 1; y < bounds.maxY; y += 1) {
+        changes.push({ x: bounds.minX, y, color });
+        if (bounds.maxX !== bounds.minX) changes.push({ x: bounds.maxX, y, color });
+      }
+    }
+  } else {
+    if (width * height > MAX_SHAPE_PIXELS) return null;
+    const centerX = (bounds.minX + bounds.maxX + 1) / 2;
+    const centerY = (bounds.minY + bounds.maxY + 1) / 2;
+    const radiusX = width / 2;
+    const radiusY = height / 2;
+    const isInside = (x: number, y: number) => {
+      if (x < bounds.minX || x > bounds.maxX || y < bounds.minY || y > bounds.maxY) return false;
+      const normalizedX = (x + 0.5 - centerX) / radiusX;
+      const normalizedY = (y + 0.5 - centerY) / radiusY;
+      return normalizedX * normalizedX + normalizedY * normalizedY <= 1;
+    };
+
+    for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
+      for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
+        if (!isInside(x, y)) continue;
+        if (
+          style === "filled" ||
+          !isInside(x - 1, y) ||
+          !isInside(x + 1, y) ||
+          !isInside(x, y - 1) ||
+          !isInside(x, y + 1)
+        ) {
+          changes.push({ x, y, color });
+        }
+      }
+    }
+  }
+
+  return applySymmetry(changes, symmetry, MAX_SHAPE_PIXELS);
+}
+
 function App() {
   const [initialState] = useState(loadPersistedState);
   const [pixelHistory, dispatch] = useReducer(pixelReducer, {
@@ -341,6 +468,9 @@ function App() {
   const [selectedColor, setSelectedColor] = useState(initialState.selectedColor);
   const [customColors, setCustomColors] = useState(initialState.customColors);
   const [tool, setTool] = useState<Tool>("paint");
+  const [shapeStyle, setShapeStyle] = useState<ShapeStyle>("outline");
+  const [symmetry, setSymmetry] = useState<Symmetry>({ horizontal: false, vertical: false });
+  const [shapePreview, setShapePreview] = useState<PixelChange[]>([]);
   const [viewport, setViewport] = useState<Viewport>(initialState.viewport);
   const [canvasSize, setCanvasSize] = useState({ width: 1, height: 1 });
   const [activity, setActivity] = useState("Canvas ready. Pick a color and draw.");
@@ -360,8 +490,9 @@ function App() {
   const viewportRef = useRef(viewport);
   const pointerRef = useRef<PointerState>(null);
   const historyGroupRef = useRef(0);
-  const toolBeforePickerRef = useRef<"paint" | "fill">("paint");
+  const toolBeforePickerRef = useRef<ColorTool>("paint");
   const touchPointsRef = useRef(new Map<number, ScreenPoint>());
+  const shapePreviewFrameRef = useRef<number | null>(null);
   const spacePressedRef = useRef(false);
   const suppressContextMenuRef = useRef(false);
   pixelsRef.current = pixels;
@@ -431,7 +562,7 @@ function App() {
       if (!showExport && !isTyping && !event.repeat && shortcutTool) {
         event.preventDefault();
         if (shortcutTool === "picker" && tool !== "picker") {
-          toolBeforePickerRef.current = tool === "fill" ? "fill" : "paint";
+          toolBeforePickerRef.current = isColorTool(tool) ? tool : "paint";
         }
         setTool(shortcutTool);
         setActivity(`${shortcutTool === "paint" ? "Draw" : shortcutTool[0].toUpperCase() + shortcutTool.slice(1)} tool selected.`);
@@ -490,6 +621,14 @@ function App() {
       context.fillRect(screenX(x), screenY(y), zoom, zoom);
     }
 
+    context.globalAlpha = 0.58;
+    for (const { x, y, color } of shapePreview) {
+      if (x < minX || x > maxX || y < minY || y > maxY) continue;
+      context.fillStyle = color;
+      context.fillRect(screenX(x), screenY(y), zoom, zoom);
+    }
+    context.globalAlpha = 1;
+
     context.beginPath();
     context.strokeStyle = "#d5d7d2";
     context.lineWidth = 1;
@@ -505,15 +644,18 @@ function App() {
     }
     context.stroke();
 
-    context.beginPath();
-    context.strokeStyle = "#aeb2ac";
     context.lineWidth = 1;
+    context.beginPath();
+    context.strokeStyle = symmetry.vertical ? "#ef5938" : "#aeb2ac";
     context.moveTo(screenX(0), 0);
     context.lineTo(screenX(0), height);
+    context.stroke();
+    context.beginPath();
+    context.strokeStyle = symmetry.horizontal ? "#ef5938" : "#aeb2ac";
     context.moveTo(0, screenY(0));
     context.lineTo(width, screenY(0));
     context.stroke();
-  }, [canvasSize, pixels, viewport]);
+  }, [canvasSize, pixels, shapePreview, symmetry, viewport]);
 
   const getCanvasPoint = (clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
@@ -531,16 +673,18 @@ function App() {
     };
   };
 
-  const startDrawingAt = (clientX: number, clientY: number) => {
+  const startDrawingAt = (clientX: number, clientY: number, pointerId: number) => {
     const pixel = getPixelAt(clientX, clientY);
     if (!pixel) return;
     const color = tool === "erase" ? EMPTY_PIXEL : selectedColor;
+    const changes = applySymmetry([{ ...pixel, color }], symmetry);
+    if (!changes) return;
     historyGroupRef.current += 1;
     const historyGroup = historyGroupRef.current;
-    pointerRef.current = { kind: "draw", lastPixel: pixel, historyGroup };
+    pointerRef.current = { kind: "draw", pointerId, lastPixel: pixel, historyGroup, color, symmetry };
     dispatch({
       type: "paint",
-      changes: [{ ...pixel, color }],
+      changes,
       historyGroup,
     });
     setActivity(`You ${tool === "erase" ? "erased" : "painted"} pixel (${pixel.x}, ${pixel.y}).`);
@@ -549,14 +693,59 @@ function App() {
   const continueDrawingAt = (clientX: number, clientY: number, pointer: Extract<PointerState, { kind: "draw" }>) => {
     const pixel = getPixelAt(clientX, clientY);
     if (!pixel || (pixel.x === pointer.lastPixel.x && pixel.y === pointer.lastPixel.y)) return;
-    const color = tool === "erase" ? EMPTY_PIXEL : selectedColor;
+    const changes = applySymmetry(pixelsOnLine(pointer.lastPixel, pixel, pointer.color), pointer.symmetry);
+    if (!changes) return;
     dispatch({
       type: "paint",
-      changes: pixelsOnLine(pointer.lastPixel, pixel, color),
+      changes,
       historyGroup: pointer.historyGroup,
     });
-    pointerRef.current = { kind: "draw", lastPixel: pixel, historyGroup: pointer.historyGroup };
-    setActivity(`You ${tool === "erase" ? "erased to" : "painted to"} pixel (${pixel.x}, ${pixel.y}).`);
+    pointerRef.current = { ...pointer, lastPixel: pixel };
+    setActivity(`You ${pointer.color === EMPTY_PIXEL ? "erased to" : "painted to"} pixel (${pixel.x}, ${pixel.y}).`);
+  };
+
+  const startShapeAt = (clientX: number, clientY: number, pointerId: number, shapeTool: ShapeTool) => {
+    const pixel = getPixelAt(clientX, clientY);
+    if (!pixel) return;
+    const pointer: Extract<PointerState, { kind: "shape" }> = {
+      kind: "shape",
+      pointerId,
+      anchor: pixel,
+      current: pixel,
+      tool: shapeTool,
+      color: selectedColor,
+      style: shapeStyle,
+      symmetry,
+    };
+    pointerRef.current = pointer;
+    setShapePreview(pixelsInShape(shapeTool, pixel, pixel, shapeStyle, selectedColor, symmetry) ?? []);
+  };
+
+  const continueShapeAt = (
+    clientX: number,
+    clientY: number,
+    pointer: Extract<PointerState, { kind: "shape" }>,
+  ) => {
+    const pixel = getPixelAt(clientX, clientY);
+    if (!pixel || (pixel.x === pointer.current.x && pixel.y === pointer.current.y)) return;
+    const nextPointer = { ...pointer, current: pixel };
+    pointerRef.current = nextPointer;
+    if (shapePreviewFrameRef.current !== null) return;
+    shapePreviewFrameRef.current = window.requestAnimationFrame(() => {
+      shapePreviewFrameRef.current = null;
+      const activePointer = pointerRef.current;
+      if (activePointer?.kind !== "shape") return;
+      setShapePreview(
+        pixelsInShape(
+          activePointer.tool,
+          activePointer.anchor,
+          activePointer.current,
+          activePointer.style,
+          activePointer.color,
+          activePointer.symmetry,
+        ) ?? [],
+      );
+    });
   };
 
   const fillAt = (clientX: number, clientY: number) => {
@@ -594,14 +783,15 @@ function App() {
     setActivity(`Picked ${color} from pixel (${pixel.x}, ${pixel.y}).`);
   };
 
-  const startSelectionAt = (clientX: number, clientY: number) => {
+  const startSelectionAt = (clientX: number, clientY: number, pointerId: number) => {
     const pixel = getPixelAt(clientX, clientY);
     if (!pixel) return;
-    pointerRef.current = { kind: "select", anchor: pixel };
+    pointerRef.current = { kind: "select", pointerId, anchor: pixel };
     setSelection(selectionBounds(pixel, pixel));
   };
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (pointerRef.current && !(event.pointerType === "touch" && tool === "pan")) return;
     const shouldPan =
       event.button === 1 ||
       event.button === 2 ||
@@ -611,7 +801,8 @@ function App() {
     const shouldPickColor = event.button === 0 && !shouldPan && tool === "picker";
     const shouldSelect = event.button === 0 && !shouldPan && tool === "select";
     const shouldDraw = event.button === 0 && !shouldPan && (tool === "paint" || tool === "erase");
-    if (!shouldPan && !shouldDraw && !shouldFill && !shouldPickColor && !shouldSelect) return;
+    const shouldShape = event.button === 0 && !shouldPan && isShapeTool(tool);
+    if (!shouldPan && !shouldDraw && !shouldFill && !shouldPickColor && !shouldSelect && !shouldShape) return;
 
     if (event.button !== 2) event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -631,7 +822,11 @@ function App() {
     }
 
     if (shouldSelect) {
-      startSelectionAt(event.clientX, event.clientY);
+      startSelectionAt(event.clientX, event.clientY, event.pointerId);
+      return;
+    }
+    if (shouldShape) {
+      startShapeAt(event.clientX, event.clientY, event.pointerId, tool);
       return;
     }
     if (shouldFill) {
@@ -643,13 +838,14 @@ function App() {
       return;
     }
     if (shouldDraw) {
-      startDrawingAt(event.clientX, event.clientY);
+      startDrawingAt(event.clientX, event.clientY, event.pointerId);
       return;
     }
 
     if (event.button === 2) suppressContextMenuRef.current = false;
     pointerRef.current = {
       kind: "pan",
+      pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
       lastX: event.clientX,
@@ -665,6 +861,7 @@ function App() {
     }
     const pointer = pointerRef.current;
     if (!pointer || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    if ("pointerId" in pointer && pointer.pointerId !== event.pointerId) return;
 
     if (pointer.kind === "pinch") {
       const pinch = getPinchMetrics(touchPointsRef.current);
@@ -701,6 +898,11 @@ function App() {
       return;
     }
 
+    if (pointer.kind === "shape") {
+      continueShapeAt(event.clientX, event.clientY, pointer);
+      return;
+    }
+
     if (pointer.kind === "select") {
       const pixel = getPixelAt(event.clientX, event.clientY);
       if (pixel) setSelection(selectionBounds(pointer.anchor, pixel));
@@ -729,11 +931,19 @@ function App() {
     }));
   };
 
-  const handlePointerEnd = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+  const handlePointerEnd = (event: ReactPointerEvent<HTMLCanvasElement>, cancelled = false) => {
+    const activePointer = pointerRef.current;
+    if (activePointer && "pointerId" in activePointer && activePointer.pointerId !== event.pointerId) return;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     touchPointsRef.current.delete(event.pointerId);
+    if (cancelled) {
+      setShapePreview([]);
+      pointerRef.current = null;
+      setIsPanning(false);
+      return;
+    }
     if (pointerRef.current?.kind === "pinch") {
       const pinch = getPinchMetrics(touchPointsRef.current);
       if (pinch) {
@@ -743,14 +953,15 @@ function App() {
           lastDistance: pinch.distance,
         };
       } else {
-        const remainingTouch = Array.from(touchPointsRef.current.values())[0];
+        const remainingTouch = Array.from(touchPointsRef.current.entries())[0];
         pointerRef.current = remainingTouch
           ? {
               kind: "pan",
-              startX: remainingTouch.x,
-              startY: remainingTouch.y,
-              lastX: remainingTouch.x,
-              lastY: remainingTouch.y,
+              pointerId: remainingTouch[0],
+              startX: remainingTouch[1].x,
+              startY: remainingTouch[1].y,
+              lastX: remainingTouch[1].x,
+              lastY: remainingTouch[1].y,
               hasDragged: true,
               button: 0,
             }
@@ -758,6 +969,26 @@ function App() {
         setIsPanning(Boolean(remainingTouch));
       }
       return;
+    }
+    if (pointerRef.current?.kind === "shape") {
+      const pointer = pointerRef.current;
+      const endpoint = getPixelAt(event.clientX, event.clientY) ?? pointer.current;
+      const changes = pixelsInShape(
+        pointer.tool,
+        pointer.anchor,
+        endpoint,
+        pointer.style,
+        pointer.color,
+        pointer.symmetry,
+      );
+      setShapePreview([]);
+      if (!changes) {
+        setActivity(`Shape is too large. Stamps are limited to ${MAX_SHAPE_PIXELS} pixels.`);
+      } else {
+        dispatch({ type: "paint", changes });
+        const label = pointer.tool === "rectangle" ? "rectangle" : pointer.tool;
+        setActivity(`Stamped a ${pointer.style === "filled" && pointer.tool !== "line" ? "filled " : ""}${label} with ${changes.length} pixel${changes.length === 1 ? "" : "s"}.`);
+      }
     }
     if (pointerRef.current?.kind === "select") {
       const pixel = getPixelAt(event.clientX, event.clientY);
@@ -1268,14 +1499,14 @@ function App() {
               {paletteColors.map((color, index) => (
                 <button
                   key={index}
-                  className={(tool === "paint" || tool === "fill") && selectedColor === color ? "swatch swatch--active" : "swatch"}
+                  className={isColorTool(tool) && selectedColor === color ? "swatch swatch--active" : "swatch"}
                   style={{ backgroundColor: color }}
                   type="button"
                   aria-label={`Use color ${color}`}
-                  aria-pressed={(tool === "paint" || tool === "fill") && selectedColor === color}
+                  aria-pressed={isColorTool(tool) && selectedColor === color}
                   onClick={() => {
                     selectEditorColor(color);
-                    if (tool !== "fill") setTool("paint");
+                    if (!isColorTool(tool)) setTool("paint");
                   }}
                 />
               ))}
@@ -1287,7 +1518,7 @@ function App() {
                   aria-label="Choose a custom color"
                   onChange={(event) => {
                     selectEditorColor(event.target.value);
-                    if (tool !== "fill") setTool("paint");
+                    if (!isColorTool(tool)) setTool("paint");
                   }}
                 />
               </label>
@@ -1299,7 +1530,7 @@ function App() {
                 aria-keyshortcuts="I"
                 title="Pick color (I)"
                 onClick={() => {
-                  if (tool !== "picker") toolBeforePickerRef.current = tool === "fill" ? "fill" : "paint";
+                  if (tool !== "picker") toolBeforePickerRef.current = isColorTool(tool) ? tool : "paint";
                   setTool("picker");
                 }}
               >
@@ -1330,6 +1561,70 @@ function App() {
                   </button>
                 );
               })}
+            </div>
+          </fieldset>
+
+          <fieldset className="shape-control">
+            <legend>Shape</legend>
+            <div className="segmented-control shape-buttons">
+              {(["line", "rectangle", "ellipse"] as ShapeTool[]).map((mode) => {
+                const label = mode === "rectangle" ? "Rect" : mode[0].toUpperCase() + mode.slice(1);
+                const shortcut = mode === "line" ? "L" : mode === "rectangle" ? "R" : "O";
+                return (
+                  <button
+                    key={mode}
+                    className={tool === mode ? "segment segment--active" : "segment"}
+                    type="button"
+                    aria-pressed={tool === mode}
+                    aria-keyshortcuts={shortcut}
+                    title={`${mode[0].toUpperCase() + mode.slice(1)} (${shortcut})`}
+                    onClick={() => setTool(mode)}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+              {(["outline", "filled"] as ShapeStyle[]).map((style) => (
+                <button
+                  key={style}
+                  className={shapeStyle === style ? "segment segment--active shape-style" : "segment shape-style"}
+                  type="button"
+                  aria-pressed={shapeStyle === style}
+                  onClick={() => setShapeStyle(style)}
+                >
+                  {style === "outline" ? "Out" : "Fill"}
+                </button>
+              ))}
+            </div>
+          </fieldset>
+
+          <fieldset className="symmetry-control">
+            <legend>Mirror</legend>
+            <div className="segmented-control">
+              <button
+                className={symmetry.horizontal ? "segment segment--active" : "segment"}
+                type="button"
+                aria-pressed={symmetry.horizontal}
+                title="Mirror across the horizontal origin axis"
+                onClick={() => {
+                  setSymmetry((current) => ({ ...current, horizontal: !current.horizontal }));
+                  setActivity(`Horizontal mirror ${symmetry.horizontal ? "disabled" : "enabled"}.`);
+                }}
+              >
+                Horizontal
+              </button>
+              <button
+                className={symmetry.vertical ? "segment segment--active" : "segment"}
+                type="button"
+                aria-pressed={symmetry.vertical}
+                title="Mirror across the vertical origin axis"
+                onClick={() => {
+                  setSymmetry((current) => ({ ...current, vertical: !current.vertical }));
+                  setActivity(`Vertical mirror ${symmetry.vertical ? "disabled" : "enabled"}.`);
+                }}
+              >
+                Vertical
+              </button>
             </div>
           </fieldset>
 
@@ -1402,12 +1697,12 @@ function App() {
           <canvas
             ref={canvasRef}
             className={`pixel-canvas pixel-canvas--${tool}${isPanning ? " pixel-canvas--panning" : ""}`}
-            aria-label="Unbounded pixel canvas. Use Draw, Erase, Fill, Pick color, or Select; right-drag or Space-drag to pan, and use the mouse wheel to zoom."
+            aria-label="Unbounded pixel canvas. Use Draw, Erase, Fill, Line, Rectangle, Ellipse, Pick color, or Select; enable horizontal or vertical mirroring around the origin axes; right-drag or Space-drag to pan, and use the mouse wheel to zoom."
             tabIndex={0}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerEnd}
-            onPointerCancel={handlePointerEnd}
+            onPointerCancel={(event) => handlePointerEnd(event, true)}
             onKeyDown={handleCanvasKeyDown}
             onContextMenu={(event) => {
               if (suppressContextMenuRef.current) {
