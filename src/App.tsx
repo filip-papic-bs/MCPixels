@@ -1,6 +1,5 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 import type {
-  CSSProperties,
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
 } from "react";
@@ -1247,11 +1246,11 @@ function App() {
           <fieldset className="color-control">
             <legend>Color</legend>
             <div className="palette">
-              {paletteColors.map((color) => (
+              {paletteColors.map((color, index) => (
                 <button
-                  key={color}
+                  key={index}
                   className={(tool === "paint" || tool === "fill") && selectedColor === color ? "swatch swatch--active" : "swatch"}
-                  style={{ "--swatch": color } as CSSProperties}
+                  style={{ backgroundColor: color }}
                   type="button"
                   aria-label={`Use color ${color}`}
                   aria-pressed={(tool === "paint" || tool === "fill") && selectedColor === color}

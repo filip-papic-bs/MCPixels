@@ -186,7 +186,6 @@ legend {
   overflow: hidden;
   border: 1px solid #62655f;
   border-radius: 0;
-  background: var(--swatch);
   cursor: pointer;
 }
 
@@ -745,7 +744,7 @@ legend {
   .segment,
   .zoom-buttons button,
   .clear-button {
-    transition: transform 120ms ease, background-color 120ms ease;
+    transition: transform 120ms ease;
   }
 
   .swatch:hover,
