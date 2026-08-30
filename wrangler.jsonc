@@ -1,0 +1,7 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mcpixels",
+  "pages_build_output_dir": "./dist",
+  "compatibility_date": "2026-08-30",
+  "send_metrics": false
+}
