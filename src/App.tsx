@@ -12,8 +12,8 @@ const DEFAULT_ZOOM = 22;
 const DRAG_THRESHOLD = 5;
 const MAX_TOOL_COORDINATE = 1_000_000;
 const STORAGE_KEY = "mcpixels.editor.v1";
-const SELECTION_ACTIONS_WIDTH = 139;
-const SELECTION_ACTIONS_WITH_PASTE_WIDTH = 172;
+const SELECTION_ACTIONS_WIDTH = 172;
+const SELECTION_ACTIONS_WITH_PASTE_WIDTH = 205;
 const SELECTION_ACTIONS_HEIGHT = 32;
 const SELECTION_ACTIONS_GAP = 8;
 const COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
@@ -807,8 +807,8 @@ function App() {
     setActivity(`Cleared ${cleared} pixel${cleared === 1 ? "" : "s"} from the selection.`);
   };
 
-  const copySelection = () => {
-    if (!selection) return;
+  const captureSelection = () => {
+    if (!selection) return null;
     const copiedPixels: PixelChange[] = [];
     for (const [key, color] of pixelsRef.current) {
       const [x, y] = key.split(",").map(Number);
@@ -818,9 +818,25 @@ function App() {
     }
     const width = selection.maxX - selection.minX + 1;
     const height = selection.maxY - selection.minY + 1;
-    setCopiedSelection({ pixels: copiedPixels, width, height });
+    return { pixels: copiedPixels, width, height };
+  };
+
+  const copySelection = () => {
+    const copied = captureSelection();
+    if (!copied) return;
+    setCopiedSelection(copied);
     setSelection(null);
-    setActivity(`Copied ${copiedPixels.length} pixel${copiedPixels.length === 1 ? "" : "s"} from a ${width} by ${height} selection.`);
+    setActivity(`Copied ${copied.pixels.length} pixel${copied.pixels.length === 1 ? "" : "s"} from a ${copied.width} by ${copied.height} selection.`);
+  };
+
+  const cutSelection = () => {
+    if (!selection) return;
+    const copied = captureSelection();
+    if (!copied) return;
+    setCopiedSelection(copied);
+    dispatch({ type: "clear-area", bounds: selection });
+    setSelection(null);
+    setActivity(`Cut ${copied.pixels.length} pixel${copied.pixels.length === 1 ? "" : "s"} from a ${copied.width} by ${copied.height} selection.`);
   };
 
   const pasteSelection = () => {
@@ -989,6 +1005,13 @@ function App() {
                   <svg viewBox="0 0 16 16" aria-hidden="true">
                     <rect x="5.5" y="5.5" width="7" height="7" />
                     <path d="M3.5 10.5h-1v-8h8v1" />
+                  </svg>
+                </button>
+                <button type="button" onClick={cutSelection} aria-label="Cut selected pixels" title="Cut selected pixels">
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <circle cx="4" cy="4" r="2" />
+                    <circle cx="4" cy="12" r="2" />
+                    <path d="m5.5 5.5 7 7M5.5 10.5l7-7" />
                   </svg>
                 </button>
                 {copiedSelection ? (

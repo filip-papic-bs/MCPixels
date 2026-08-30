@@ -370,9 +370,9 @@ legend {
   position: absolute;
   z-index: 3;
   display: grid;
-  width: 139px;
+  width: 172px;
   height: 32px;
-  grid-template-columns: repeat(3, 1fr) 1px 28px;
+  grid-template-columns: repeat(4, 1fr) 1px 28px;
   gap: 3px;
   padding: 3px;
   border: 1px solid #30322f;
@@ -381,8 +381,8 @@ legend {
 }
 
 .selection-actions--with-paste {
-  width: 172px;
-  grid-template-columns: repeat(4, 1fr) 1px 28px;
+  width: 205px;
+  grid-template-columns: repeat(5, 1fr) 1px 28px;
 }
 
 .selection-actions button {
