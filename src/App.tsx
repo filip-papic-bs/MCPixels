@@ -11,8 +11,8 @@ const DEFAULT_ZOOM = 22;
 const DRAG_THRESHOLD = 5;
 const MAX_TOOL_COORDINATE = 1_000_000;
 const STORAGE_KEY = "mcpixels.editor.v1";
-const SELECTION_ACTIONS_WIDTH = 172;
-const SELECTION_ACTIONS_WITH_PASTE_WIDTH = 205;
+const SELECTION_ACTIONS_WIDTH = 273;
+const SELECTION_ACTIONS_WITH_PASTE_WIDTH = 306;
 const SELECTION_ACTIONS_HEIGHT = 32;
 const SELECTION_ACTIONS_GAP = 8;
 const DEFAULT_EXPORT_SCALE = 8;
@@ -38,6 +38,7 @@ type PixelChange = { x: number; y: number; color: string };
 type PixelAction =
   | { type: "paint"; changes: PixelChange[]; historyGroup?: number }
   | { type: "clear-area"; bounds: SelectionBounds }
+  | { type: "move"; from: SelectionBounds; changes: PixelChange[] }
   | { type: "clear" }
   | { type: "undo" }
   | { type: "redo" };
@@ -50,6 +51,7 @@ type PixelHistory = {
 type Viewport = { x: number; y: number; zoom: number };
 type SelectionBounds = { minX: number; minY: number; maxX: number; maxY: number };
 type CopiedSelection = { pixels: PixelChange[]; width: number; height: number };
+type MovingSelection = { originalBounds: SelectionBounds; captured: CopiedSelection };
 type ScreenPoint = { x: number; y: number };
 type ShapeTool = "line" | "rectangle" | "ellipse";
 type ColorTool = "paint" | "fill" | ShapeTool;
@@ -87,6 +89,7 @@ type PointerState =
       symmetry: Symmetry;
     }
   | { kind: "select"; pointerId: number; anchor: { x: number; y: number } }
+  | { kind: "move-selection"; pointerId: number; anchor: { x: number; y: number } }
   | { kind: "pinch"; lastCenter: ScreenPoint; lastDistance: number }
   | {
       kind: "pan";
@@ -157,6 +160,24 @@ function pixelReducer(state: PixelHistory, action: PixelAction): PixelHistory {
       const [x, y] = key.split(",").map(Number);
       if (x >= action.bounds.minX && x <= action.bounds.maxX && y >= action.bounds.minY && y <= action.bounds.maxY) {
         next.delete(key);
+        changed = true;
+      }
+    }
+  } else if (action.type === "move") {
+    next = new Map(state.pixels);
+    for (const key of state.pixels.keys()) {
+      const [x, y] = key.split(",").map(Number);
+      if (x >= action.from.minX && x <= action.from.maxX && y >= action.from.minY && y <= action.from.maxY) {
+        next.delete(key);
+        changed = true;
+      }
+    }
+    for (const { x, y, color } of action.changes) {
+      const key = pixelKey(x, y);
+      if (color === EMPTY_PIXEL) {
+        if (next.delete(key)) changed = true;
+      } else if (next.get(key) !== color) {
+        next.set(key, color);
         changed = true;
       }
     }
@@ -477,6 +498,7 @@ function App() {
   const [webMcpStatus, setWebMcpStatus] = useState<"checking" | "ready" | "unavailable" | "error">("checking");
   const [isPanning, setIsPanning] = useState(false);
   const [selection, setSelection] = useState<SelectionBounds | null>(null);
+  const [movingSelection, setMovingSelection] = useState<MovingSelection | null>(null);
   const [copiedSelection, setCopiedSelection] = useState<CopiedSelection | null>(null);
   const [showExport, setShowExport] = useState(false);
   const [exportMode, setExportMode] = useState<ExportMode>("scale");
@@ -614,11 +636,31 @@ function App() {
     context.fillStyle = "#fafaf7";
     context.fillRect(0, 0, width, height);
 
+    const movingFrom = movingSelection?.originalBounds ?? null;
     for (const [key, color] of pixels) {
       const [x, y] = key.split(",").map(Number);
       if (x < minX || x > maxX || y < minY || y > maxY) continue;
+      if (
+        movingFrom &&
+        x >= movingFrom.minX &&
+        x <= movingFrom.maxX &&
+        y >= movingFrom.minY &&
+        y <= movingFrom.maxY
+      ) {
+        continue;
+      }
       context.fillStyle = color;
       context.fillRect(screenX(x), screenY(y), zoom, zoom);
+    }
+
+    if (movingSelection && selection) {
+      for (const { x, y, color } of movingSelection.captured.pixels) {
+        const targetX = selection.minX + x;
+        const targetY = selection.minY + y;
+        if (targetX < minX || targetX > maxX || targetY < minY || targetY > maxY) continue;
+        context.fillStyle = color;
+        context.fillRect(screenX(targetX), screenY(targetY), zoom, zoom);
+      }
     }
 
     context.globalAlpha = 0.58;
@@ -655,7 +697,7 @@ function App() {
     context.moveTo(0, screenY(0));
     context.lineTo(width, screenY(0));
     context.stroke();
-  }, [canvasSize, pixels, shapePreview, symmetry, viewport]);
+  }, [canvasSize, movingSelection, pixels, selection, shapePreview, symmetry, viewport]);
 
   const getCanvasPoint = (clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
@@ -790,6 +832,18 @@ function App() {
     setSelection(selectionBounds(pixel, pixel));
   };
 
+  const isInsideSelection = (pixel: { x: number; y: number }, bounds: SelectionBounds) =>
+    pixel.x >= bounds.minX && pixel.x <= bounds.maxX && pixel.y >= bounds.minY && pixel.y <= bounds.maxY;
+
+  const startMoveSelectionAt = (clientX: number, clientY: number, pointerId: number) => {
+    const pixel = getPixelAt(clientX, clientY);
+    if (!pixel || !selection) return;
+    const captured = captureSelection();
+    if (!captured) return;
+    pointerRef.current = { kind: "move-selection", pointerId, anchor: pixel };
+    setMovingSelection({ originalBounds: selection, captured });
+  };
+
   const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     if (pointerRef.current && !(event.pointerType === "touch" && tool === "pan")) return;
     const shouldPan =
@@ -822,7 +876,12 @@ function App() {
     }
 
     if (shouldSelect) {
-      startSelectionAt(event.clientX, event.clientY, event.pointerId);
+      const pixel = getPixelAt(event.clientX, event.clientY);
+      if (pixel && selection && isInsideSelection(pixel, selection)) {
+        startMoveSelectionAt(event.clientX, event.clientY, event.pointerId);
+      } else {
+        startSelectionAt(event.clientX, event.clientY, event.pointerId);
+      }
       return;
     }
     if (shouldShape) {
@@ -909,6 +968,21 @@ function App() {
       return;
     }
 
+    if (pointer.kind === "move-selection") {
+      const pixel = getPixelAt(event.clientX, event.clientY);
+      if (!pixel || !movingSelection) return;
+      const { originalBounds } = movingSelection;
+      const dx = pixel.x - pointer.anchor.x;
+      const dy = pixel.y - pointer.anchor.y;
+      setSelection({
+        minX: originalBounds.minX + dx,
+        minY: originalBounds.minY + dy,
+        maxX: originalBounds.maxX + dx,
+        maxY: originalBounds.maxY + dy,
+      });
+      return;
+    }
+
     const hasDragged =
       pointer.hasDragged ||
       Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) >= DRAG_THRESHOLD;
@@ -940,6 +1014,7 @@ function App() {
     touchPointsRef.current.delete(event.pointerId);
     if (cancelled) {
       setShapePreview([]);
+      setMovingSelection(null);
       pointerRef.current = null;
       setIsPanning(false);
       return;
@@ -999,6 +1074,23 @@ function App() {
         const height = bounds.maxY - bounds.minY + 1;
         setActivity(`Selected ${width} by ${height} pixels.`);
       }
+    }
+    if (pointerRef.current?.kind === "move-selection" && movingSelection) {
+      const pointer = pointerRef.current;
+      const pixel = getPixelAt(event.clientX, event.clientY);
+      const dx = pixel ? pixel.x - pointer.anchor.x : 0;
+      const dy = pixel ? pixel.y - pointer.anchor.y : 0;
+      const { originalBounds, captured } = movingSelection;
+      if (dx !== 0 || dy !== 0) {
+        const changes = captured.pixels.map(({ x, y, color }) => ({
+          x: originalBounds.minX + x + dx,
+          y: originalBounds.minY + y + dy,
+          color,
+        }));
+        dispatch({ type: "move", from: originalBounds, changes });
+        setActivity(`Moved a ${captured.width} by ${captured.height} selection.`);
+      }
+      setMovingSelection(null);
     }
     pointerRef.current = null;
     setIsPanning(false);
@@ -1352,6 +1444,51 @@ function App() {
     setActivity(`Pasted ${changes.length} pixel${changes.length === 1 ? "" : "s"} from a ${copiedSelection.width} by ${copiedSelection.height} copy.`);
   };
 
+  const transformSelection = (
+    mapPixel: (x: number, y: number, width: number, height: number) => { x: number; y: number },
+    nextDimensions: (width: number, height: number) => { width: number; height: number },
+    label: string,
+  ) => {
+    if (!selection) return;
+    const captured = captureSelection();
+    if (!captured) return;
+    const { width, height } = captured;
+    const { width: nextWidth, height: nextHeight } = nextDimensions(width, height);
+    const changes = captured.pixels.map(({ x, y, color }) => {
+      const mapped = mapPixel(x, y, width, height);
+      return { x: selection.minX + mapped.x, y: selection.minY + mapped.y, color };
+    });
+    dispatch({ type: "move", from: selection, changes });
+    setSelection({
+      minX: selection.minX,
+      minY: selection.minY,
+      maxX: selection.minX + nextWidth - 1,
+      maxY: selection.minY + nextHeight - 1,
+    });
+    setActivity(`${label} the selection.`);
+  };
+
+  const flipSelectionHorizontal = () =>
+    transformSelection(
+      (x, y, width) => ({ x: width - 1 - x, y }),
+      (width, height) => ({ width, height }),
+      "Flipped horizontally",
+    );
+
+  const flipSelectionVertical = () =>
+    transformSelection(
+      (x, y, _width, height) => ({ x, y: height - 1 - y }),
+      (width, height) => ({ width, height }),
+      "Flipped vertically",
+    );
+
+  const rotateSelectionClockwise = () =>
+    transformSelection(
+      (x, y, _width, height) => ({ x: height - 1 - y, y: x }),
+      (width, height) => ({ width: height, height: width }),
+      "Rotated",
+    );
+
   const openExportPanel = () => {
     if (!selectionSize) return;
     const scale = Math.min(DEFAULT_EXPORT_SCALE, maxExportScale);
@@ -1696,7 +1833,7 @@ function App() {
         <div className={`canvas-column${showExport ? " canvas-column--exporting" : ""}`}>
           <canvas
             ref={canvasRef}
-            className={`pixel-canvas pixel-canvas--${tool}${isPanning ? " pixel-canvas--panning" : ""}`}
+            className={`pixel-canvas pixel-canvas--${tool}${isPanning ? " pixel-canvas--panning" : ""}${movingSelection ? " pixel-canvas--moving" : ""}`}
             aria-label="Unbounded pixel canvas. Use Draw, Erase, Fill, Line, Rectangle, Ellipse, Pick color, or Select; enable horizontal or vertical mirroring around the origin axes; right-drag or Space-drag to pan, and use the mouse wheel to zoom."
             tabIndex={0}
             onPointerDown={handlePointerDown}
@@ -1723,6 +1860,7 @@ function App() {
                 }}
                 aria-hidden="true"
               />
+              {movingSelection ? null : (
               <div
                 className={`selection-actions${copiedSelection ? " selection-actions--with-paste" : ""}`}
                 style={selectionActionsStyle}
@@ -1760,6 +1898,39 @@ function App() {
                 ) : null}
                 <button
                   type="button"
+                  onClick={flipSelectionHorizontal}
+                  aria-label="Flip selection horizontally"
+                  title="Flip selection horizontally"
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M8 2v12" />
+                    <path d="M4 5 2 8l2 3M12 5l2 3-2 3" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  onClick={flipSelectionVertical}
+                  aria-label="Flip selection vertically"
+                  title="Flip selection vertically"
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M2 8h12" />
+                    <path d="M5 4 8 2l3 2M5 12l3 2 3-2" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  onClick={rotateSelectionClockwise}
+                  aria-label="Rotate selection 90 degrees"
+                  title="Rotate selection 90°"
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <polyline points="15 3 15 7 11 7" />
+                    <path d="M13.5 10a6 6 0 1 1-1.5-6L15 7" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
                   onClick={openExportPanel}
                   aria-label="Export selection"
                   title="Export selection"
@@ -1775,6 +1946,7 @@ function App() {
                   </svg>
                 </button>
               </div>
+              )}
             </>
           ) : null}
           {showExport && selectionSize ? (

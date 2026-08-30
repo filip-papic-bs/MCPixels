@@ -373,7 +373,8 @@ legend {
   cursor: grab;
 }
 
-.pixel-canvas--panning {
+.pixel-canvas--panning,
+.pixel-canvas--moving {
   cursor: grabbing;
 }
 
@@ -395,9 +396,9 @@ legend {
   position: absolute;
   z-index: 3;
   display: grid;
-  width: 172px;
+  width: 273px;
   height: 32px;
-  grid-template-columns: repeat(4, 1fr) 1px 28px;
+  grid-template-columns: repeat(7, 1fr) 1px 28px;
   gap: 3px;
   padding: 3px;
   border: 1px solid #30322f;
@@ -406,8 +407,8 @@ legend {
 }
 
 .selection-actions--with-paste {
-  width: 205px;
-  grid-template-columns: repeat(5, 1fr) 1px 28px;
+  width: 306px;
+  grid-template-columns: repeat(8, 1fr) 1px 28px;
 }
 
 .selection-actions button {
