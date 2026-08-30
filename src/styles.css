@@ -238,6 +238,8 @@ legend {
 
 .segment {
   flex: 1;
+  padding-right: 4px;
+  padding-left: 4px;
 }
 
 .history-buttons button {
@@ -328,6 +330,10 @@ legend {
 .pixel-canvas--erase,
 .pixel-canvas--select {
   cursor: crosshair;
+}
+
+.pixel-canvas--fill {
+  cursor: cell;
 }
 
 .pixel-canvas--pan {

@@ -20,6 +20,7 @@ const DEFAULT_EXPORT_SCALE = 8;
 const MAX_EXPORT_SCALE = 64;
 const MAX_EXPORT_DIMENSION = 4096;
 const HISTORY_LIMIT = 100;
+const MAX_FILL_PIXELS = 50_000;
 const COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
 const PALETTE = [
   "#161616",
@@ -49,8 +50,12 @@ type Viewport = { x: number; y: number; zoom: number };
 type SelectionBounds = { minX: number; minY: number; maxX: number; maxY: number };
 type CopiedSelection = { pixels: PixelChange[]; width: number; height: number };
 type ScreenPoint = { x: number; y: number };
-type Tool = "paint" | "erase" | "pan" | "select";
+type Tool = "paint" | "erase" | "fill" | "pan" | "select";
 type ExportMode = "scale" | "dimensions";
+type FillResult = {
+  changes: PixelChange[];
+  reason?: "same-color" | "open-area" | "too-large";
+};
 type PersistedEditorState = {
   pixels: Map<string, string>;
   viewport: Viewport;
@@ -152,6 +157,66 @@ function selectionBounds(from: { x: number; y: number }, to: { x: number; y: num
     maxX: Math.max(from.x, to.x),
     maxY: Math.max(from.y, to.y),
   };
+}
+
+function floodFill(pixels: Map<string, string>, start: ScreenPoint, color: string): FillResult {
+  const targetColor = pixels.get(pixelKey(start.x, start.y)) ?? EMPTY_PIXEL;
+  if (targetColor === color) return { changes: [], reason: "same-color" };
+
+  const queue = [start];
+  const visited = new Set([pixelKey(start.x, start.y)]);
+  const changes: PixelChange[] = [];
+  let queueIndex = 0;
+  let bounds: SelectionBounds | null = null;
+
+  if (targetColor === EMPTY_PIXEL) {
+    if (pixels.size === 0) return { changes: [], reason: "open-area" };
+    for (const key of pixels.keys()) {
+      const [x, y] = key.split(",").map(Number);
+      if (!bounds) bounds = { minX: x, minY: y, maxX: x, maxY: y };
+      else {
+        bounds.minX = Math.min(bounds.minX, x);
+        bounds.minY = Math.min(bounds.minY, y);
+        bounds.maxX = Math.max(bounds.maxX, x);
+        bounds.maxY = Math.max(bounds.maxY, y);
+      }
+    }
+    if (!bounds || start.x < bounds.minX || start.x > bounds.maxX || start.y < bounds.minY || start.y > bounds.maxY) {
+      return { changes: [], reason: "open-area" };
+    }
+  }
+
+  while (queueIndex < queue.length) {
+    const point = queue[queueIndex];
+    queueIndex += 1;
+    if (
+      targetColor === EMPTY_PIXEL &&
+      bounds &&
+      (point.x <= bounds.minX - 1 || point.x >= bounds.maxX + 1 || point.y <= bounds.minY - 1 || point.y >= bounds.maxY + 1)
+    ) {
+      return { changes: [], reason: "open-area" };
+    }
+
+    changes.push({ ...point, color });
+    if (changes.length > MAX_FILL_PIXELS) return { changes: [], reason: "too-large" };
+
+    const neighbors = [
+      { x: point.x - 1, y: point.y },
+      { x: point.x + 1, y: point.y },
+      { x: point.x, y: point.y - 1 },
+      { x: point.x, y: point.y + 1 },
+    ];
+    for (const neighbor of neighbors) {
+      const key = pixelKey(neighbor.x, neighbor.y);
+      if (visited.has(key)) continue;
+      const neighborColor = pixels.get(key) ?? EMPTY_PIXEL;
+      if (neighborColor !== targetColor) continue;
+      visited.add(key);
+      queue.push(neighbor);
+    }
+  }
+
+  return { changes };
 }
 
 function getPinchMetrics(points: Map<number, ScreenPoint>) {
@@ -451,6 +516,20 @@ function App() {
     setActivity(`You ${tool === "erase" ? "erased to" : "painted to"} pixel (${pixel.x}, ${pixel.y}).`);
   };
 
+  const fillAt = (clientX: number, clientY: number) => {
+    const pixel = getPixelAt(clientX, clientY);
+    if (!pixel) return;
+    const result = floodFill(pixelsRef.current, pixel, selectedColor);
+    if (result.changes.length > 0) {
+      dispatch({ type: "paint", changes: result.changes });
+      setActivity(`Filled ${result.changes.length} pixel${result.changes.length === 1 ? "" : "s"}.`);
+      return;
+    }
+    if (result.reason === "open-area") setActivity("Open empty space cannot be filled on the infinite canvas.");
+    else if (result.reason === "too-large") setActivity(`Fill stopped because it exceeded ${MAX_FILL_PIXELS} pixels.`);
+    else setActivity("That area already uses the selected color.");
+  };
+
   const startSelectionAt = (clientX: number, clientY: number) => {
     const pixel = getPixelAt(clientX, clientY);
     if (!pixel) return;
@@ -464,9 +543,10 @@ function App() {
       event.button === 2 ||
       tool === "pan" ||
       (event.button === 0 && spacePressedRef.current);
+    const shouldFill = event.button === 0 && !shouldPan && tool === "fill";
     const shouldSelect = event.button === 0 && !shouldPan && tool === "select";
-    const shouldDraw = event.button === 0 && !shouldPan && !shouldSelect;
-    if (!shouldPan && !shouldDraw && !shouldSelect) return;
+    const shouldDraw = event.button === 0 && !shouldPan && (tool === "paint" || tool === "erase");
+    if (!shouldPan && !shouldDraw && !shouldFill && !shouldSelect) return;
 
     if (event.button !== 2) event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -487,6 +567,10 @@ function App() {
 
     if (shouldSelect) {
       startSelectionAt(event.clientX, event.clientY);
+      return;
+    }
+    if (shouldFill) {
+      fillAt(event.clientX, event.clientY);
       return;
     }
     if (shouldDraw) {
@@ -1114,14 +1198,14 @@ function App() {
               {PALETTE.map((color) => (
                 <button
                   key={color}
-                  className={tool === "paint" && selectedColor === color ? "swatch swatch--active" : "swatch"}
+                  className={(tool === "paint" || tool === "fill") && selectedColor === color ? "swatch swatch--active" : "swatch"}
                   style={{ "--swatch": color } as CSSProperties}
                   type="button"
                   aria-label={`Use color ${color}`}
-                  aria-pressed={tool === "paint" && selectedColor === color}
+                  aria-pressed={(tool === "paint" || tool === "fill") && selectedColor === color}
                   onClick={() => {
                     setSelectedColor(color);
-                    setTool("paint");
+                    if (tool !== "fill") setTool("paint");
                   }}
                 />
               ))}
@@ -1133,7 +1217,7 @@ function App() {
                   aria-label="Choose a custom color"
                   onChange={(event) => {
                     setSelectedColor(event.target.value);
-                    setTool("paint");
+                    if (tool !== "fill") setTool("paint");
                   }}
                 />
               </label>
@@ -1143,7 +1227,7 @@ function App() {
           <fieldset className="mode-control">
             <legend>Tool</legend>
             <div className="segmented-control">
-              {(["paint", "erase", "pan", "select"] as Tool[]).map((mode) => (
+              {(["paint", "erase", "fill", "pan", "select"] as Tool[]).map((mode) => (
                 <button
                   key={mode}
                   className={tool === mode ? "segment segment--active" : "segment"}
@@ -1151,7 +1235,7 @@ function App() {
                   aria-pressed={tool === mode}
                   onClick={() => setTool(mode)}
                 >
-                  {mode === "paint" ? "Draw" : mode === "erase" ? "Erase" : mode === "pan" ? "Pan" : "Select"}
+                  {mode === "paint" ? "Draw" : mode === "erase" ? "Erase" : mode === "fill" ? "Fill" : mode === "pan" ? "Pan" : "Select"}
                 </button>
               ))}
             </div>
@@ -1226,7 +1310,7 @@ function App() {
           <canvas
             ref={canvasRef}
             className={`pixel-canvas pixel-canvas--${tool}${isPanning ? " pixel-canvas--panning" : ""}`}
-            aria-label="Unbounded pixel canvas. Left-drag to draw, right-drag or Space-drag to pan, and use the mouse wheel to zoom."
+            aria-label="Unbounded pixel canvas. Use Draw, Erase, Fill, or Select; right-drag or Space-drag to pan, and use the mouse wheel to zoom."
             tabIndex={0}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}

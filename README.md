@@ -1,6 +1,6 @@
 # MCPixels
 
-A small unbounded pixel editor that a person and an AI agent can edit on the same live page. Use Draw and Erase to edit pixels, or Select to clear, copy, cut, paste, and export rectangular selections. PNG exports support a scale multiplier or exact output dimensions. Undo and Redo are available as buttons and with standard keyboard shortcuts. Right-drag, middle-drag, Space-drag, or use Pan to move. Pan also supports two-finger pinch zoom on touch screens.
+A small unbounded pixel editor that a person and an AI agent can edit on the same live page. Use Draw, Erase, and Fill to edit pixels, or Select to clear, copy, cut, paste, and export rectangular selections. Fill replaces contiguous color regions and enclosed transparent regions. PNG exports support a scale multiplier or exact output dimensions. Undo and Redo are available as buttons and with standard keyboard shortcuts. Right-drag, middle-drag, Space-drag, or use Pan to move. Pan also supports two-finger pinch zoom on touch screens.
 
 ## Run locally
 
