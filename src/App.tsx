@@ -79,6 +79,15 @@ type PointerState =
 
 const pixelKey = (x: number, y: number) => `${x},${y}`;
 
+const TOOL_SHORTCUTS: Record<string, Tool> = {
+  b: "paint",
+  e: "erase",
+  g: "fill",
+  i: "picker",
+  h: "pan",
+  m: "select",
+};
+
 function pixelReducer(state: PixelHistory, action: PixelAction): PixelHistory {
   if (action.type === "undo") {
     const pixels = state.undoStack.at(-1);
@@ -418,6 +427,16 @@ function App() {
         setActivity("Redid the last pixel edit.");
         return;
       }
+      const shortcutTool = !modifierPressed && !event.altKey ? TOOL_SHORTCUTS[key] : undefined;
+      if (!showExport && !isTyping && !event.repeat && shortcutTool) {
+        event.preventDefault();
+        if (shortcutTool === "picker" && tool !== "picker") {
+          toolBeforePickerRef.current = tool === "fill" ? "fill" : "paint";
+        }
+        setTool(shortcutTool);
+        setActivity(`${shortcutTool === "paint" ? "Draw" : shortcutTool[0].toUpperCase() + shortcutTool.slice(1)} tool selected.`);
+        return;
+      }
       if (event.code !== "Space" || event.repeat || isTyping || target?.matches("button")) return;
       spacePressedRef.current = true;
       event.preventDefault();
@@ -436,7 +455,7 @@ function App() {
       window.removeEventListener("keyup", handleKeyUp);
       window.removeEventListener("blur", handleBlur);
     };
-  }, [pixelHistory.redoStack.length, pixelHistory.undoStack.length, showExport]);
+  }, [pixelHistory.redoStack.length, pixelHistory.undoStack.length, showExport, tool]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1277,7 +1296,8 @@ function App() {
                 type="button"
                 aria-label="Pick a color from the canvas"
                 aria-pressed={tool === "picker"}
-                title="Pick color"
+                aria-keyshortcuts="I"
+                title="Pick color (I)"
                 onClick={() => {
                   if (tool !== "picker") toolBeforePickerRef.current = tool === "fill" ? "fill" : "paint";
                   setTool("picker");
@@ -1293,17 +1313,23 @@ function App() {
           <fieldset className="mode-control">
             <legend>Tool</legend>
             <div className="segmented-control">
-              {(["paint", "erase", "fill", "pan", "select"] as Tool[]).map((mode) => (
-                <button
-                  key={mode}
-                  className={tool === mode ? "segment segment--active" : "segment"}
-                  type="button"
-                  aria-pressed={tool === mode}
-                  onClick={() => setTool(mode)}
-                >
-                  {mode === "paint" ? "Draw" : mode === "erase" ? "Erase" : mode === "fill" ? "Fill" : mode === "pan" ? "Pan" : "Select"}
-                </button>
-              ))}
+              {(["paint", "erase", "fill", "pan", "select"] as Tool[]).map((mode) => {
+                const label = mode === "paint" ? "Draw" : mode === "erase" ? "Erase" : mode === "fill" ? "Fill" : mode === "pan" ? "Pan" : "Select";
+                const shortcut = mode === "paint" ? "B" : mode === "erase" ? "E" : mode === "fill" ? "G" : mode === "pan" ? "H" : "M";
+                return (
+                  <button
+                    key={mode}
+                    className={tool === mode ? "segment segment--active" : "segment"}
+                    type="button"
+                    aria-pressed={tool === mode}
+                    aria-keyshortcuts={shortcut}
+                    title={`${label} (${shortcut})`}
+                    onClick={() => setTool(mode)}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
             </div>
           </fieldset>
 
