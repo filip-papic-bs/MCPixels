@@ -1,6 +1,6 @@
 # MCPixels
 
-A small unbounded pixel editor that a person and an AI agent can edit on the same live page. Use Draw, Erase, and Fill to edit pixels, pick existing colors with the palette eyedropper, or Select to clear, copy, cut, paste, and export rectangular selections. Custom swatches and a most-recent-first color strip persist across reloads. Fill replaces contiguous color regions and enclosed transparent regions. PNG exports support a scale multiplier or exact output dimensions. Undo and Redo are available as buttons and with standard keyboard shortcuts. Right-drag, middle-drag, Space-drag, or use Pan to move. Pan also supports two-finger pinch zoom on touch screens.
+A small unbounded pixel editor that a person and an AI agent can edit on the same live page. Use Draw, Erase, and Fill to edit pixels, pick existing colors with the palette eyedropper, or Select to clear, copy, cut, paste, and export rectangular selections. Non-default colors persist and move to the front of the fixed-size palette when reused. Fill replaces contiguous color regions and enclosed transparent regions. PNG exports support a scale multiplier or exact output dimensions. Undo and Redo are available as buttons and with standard keyboard shortcuts. Right-drag, middle-drag, Space-drag, or use Pan to move. Pan also supports two-finger pinch zoom on touch screens.
 
 ## Run locally
 

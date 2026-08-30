@@ -22,7 +22,6 @@ const MAX_EXPORT_DIMENSION = 4096;
 const HISTORY_LIMIT = 100;
 const MAX_FILL_PIXELS = 50_000;
 const MAX_CUSTOM_COLORS = 8;
-const MAX_RECENT_COLORS = 6;
 const COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
 const PALETTE = [
   "#161616",
@@ -63,7 +62,6 @@ type PersistedEditorState = {
   viewport: Viewport;
   selectedColor: string;
   customColors: string[];
-  recentColors: string[];
 };
 type PointerState =
   | { kind: "draw"; lastPixel: { x: number; y: number }; historyGroup: number }
@@ -250,7 +248,6 @@ function loadPersistedState(): PersistedEditorState {
     viewport: { x: 0, y: 0, zoom: DEFAULT_ZOOM },
     selectedColor: PALETTE[0],
     customColors: [],
-    recentColors: [],
   };
 
   try {
@@ -283,15 +280,16 @@ function loadPersistedState(): PersistedEditorState {
       typeof saved.selectedColor === "string" && COLOR_PATTERN.test(saved.selectedColor)
         ? saved.selectedColor.toLowerCase()
         : fallback.selectedColor;
-    let customColors = readStoredColors(saved.customColors, MAX_CUSTOM_COLORS).filter(
-      (color) => !PALETTE.includes(color),
-    );
-    if (!PALETTE.includes(selectedColor) && !customColors.includes(selectedColor)) {
-      customColors = [selectedColor, ...customColors].slice(0, MAX_CUSTOM_COLORS);
-    }
-    const recentColors = readStoredColors(saved.recentColors, MAX_RECENT_COLORS);
+    const storedCustomColors = [
+      ...readStoredColors(saved.recentColors, MAX_CUSTOM_COLORS),
+      ...readStoredColors(saved.customColors, MAX_CUSTOM_COLORS),
+    ].filter((color) => !PALETTE.includes(color));
+    const customColors = [
+      ...(PALETTE.includes(selectedColor) ? [] : [selectedColor]),
+      ...storedCustomColors,
+    ].filter((color, index, colors) => colors.indexOf(color) === index).slice(0, MAX_CUSTOM_COLORS);
 
-    return { pixels, viewport, selectedColor, customColors, recentColors };
+    return { pixels, viewport, selectedColor, customColors };
   } catch (error) {
     console.warn("Could not restore the saved MCPixels canvas", error);
     return fallback;
@@ -334,7 +332,6 @@ function App() {
   const pixels = pixelHistory.pixels;
   const [selectedColor, setSelectedColor] = useState(initialState.selectedColor);
   const [customColors, setCustomColors] = useState(initialState.customColors);
-  const [recentColors, setRecentColors] = useState(initialState.recentColors);
   const [tool, setTool] = useState<Tool>("paint");
   const [viewport, setViewport] = useState<Viewport>(initialState.viewport);
   const [canvasSize, setCanvasSize] = useState({ width: 1, height: 1 });
@@ -371,7 +368,7 @@ function App() {
         });
         localStorage.setItem(
           STORAGE_KEY,
-          JSON.stringify({ version: 1, pixels: savedPixels, viewport, selectedColor, customColors, recentColors }),
+          JSON.stringify({ version: 1, pixels: savedPixels, viewport, selectedColor, customColors }),
         );
       } catch (error) {
         console.warn("Could not save the MCPixels canvas", error);
@@ -384,7 +381,7 @@ function App() {
       window.clearTimeout(timeout);
       window.removeEventListener("pagehide", save);
     };
-  }, [customColors, pixels, recentColors, selectedColor, viewport]);
+  }, [customColors, pixels, selectedColor, viewport]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -558,11 +555,10 @@ function App() {
     else setActivity("That area already uses the selected color.");
   };
 
-  const selectEditorColor = (value: string, saveAsCustom = false) => {
+  const selectEditorColor = (value: string) => {
     const color = value.toLowerCase();
     setSelectedColor(color);
-    setRecentColors((current) => [color, ...current.filter((entry) => entry !== color)].slice(0, MAX_RECENT_COLORS));
-    if (saveAsCustom && !PALETTE.includes(color)) {
+    if (!PALETTE.includes(color)) {
       setCustomColors((current) => [color, ...current.filter((entry) => entry !== color)].slice(0, MAX_CUSTOM_COLORS));
     }
   };
@@ -575,7 +571,7 @@ function App() {
       setActivity("There is no color at that pixel to pick.");
       return;
     }
-    selectEditorColor(color, true);
+    selectEditorColor(color);
     setTool(toolBeforePickerRef.current);
     setActivity(`Picked ${color} from pixel (${pixel.x}, ${pixel.y}).`);
   };
@@ -995,6 +991,7 @@ function App() {
     unavailable: "Best in ChatGPT browser",
     error: "Tool registration failed",
   }[webMcpStatus];
+  const paletteColors = [...customColors, ...PALETTE].slice(0, PALETTE.length);
 
   const selectionScreen = selection
     ? {
@@ -1249,26 +1246,8 @@ function App() {
         <div className="toolbar" aria-label="Drawing controls">
           <fieldset className="color-control">
             <legend>Color</legend>
-            {recentColors.length > 0 ? (
-              <div className="recent-colors" role="group" aria-label="Recently used colors">
-                {recentColors.map((color) => (
-                  <button
-                    key={color}
-                    className={selectedColor === color ? "recent-swatch recent-swatch--active" : "recent-swatch"}
-                    style={{ "--swatch": color } as CSSProperties}
-                    type="button"
-                    aria-label={`Use recent color ${color}`}
-                    aria-pressed={selectedColor === color}
-                    onClick={() => {
-                      selectEditorColor(color);
-                      if (tool !== "fill") setTool("paint");
-                    }}
-                  />
-                ))}
-              </div>
-            ) : null}
             <div className="palette">
-              {[...PALETTE, ...customColors].map((color) => (
+              {paletteColors.map((color) => (
                 <button
                   key={color}
                   className={(tool === "paint" || tool === "fill") && selectedColor === color ? "swatch swatch--active" : "swatch"}
@@ -1289,7 +1268,7 @@ function App() {
                   value={selectedColor}
                   aria-label="Choose a custom color"
                   onChange={(event) => {
-                    selectEditorColor(event.target.value, true);
+                    selectEditorColor(event.target.value);
                     if (tool !== "fill") setTool("paint");
                   }}
                 />
