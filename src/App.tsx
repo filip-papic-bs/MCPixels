@@ -16,6 +16,9 @@ const SELECTION_ACTIONS_WIDTH = 172;
 const SELECTION_ACTIONS_WITH_PASTE_WIDTH = 205;
 const SELECTION_ACTIONS_HEIGHT = 32;
 const SELECTION_ACTIONS_GAP = 8;
+const DEFAULT_EXPORT_SCALE = 8;
+const MAX_EXPORT_SCALE = 64;
+const MAX_EXPORT_DIMENSION = 4096;
 const COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
 const PALETTE = [
   "#161616",
@@ -37,7 +40,8 @@ type Viewport = { x: number; y: number; zoom: number };
 type SelectionBounds = { minX: number; minY: number; maxX: number; maxY: number };
 type CopiedSelection = { pixels: PixelChange[]; width: number; height: number };
 type ScreenPoint = { x: number; y: number };
-type Tool = "paint" | "erase" | "pan" | "lasso";
+type Tool = "paint" | "erase" | "pan" | "select";
+type ExportMode = "scale" | "dimensions";
 type PersistedEditorState = {
   pixels: Map<string, string>;
   viewport: Viewport;
@@ -191,6 +195,13 @@ function App() {
   const [isPanning, setIsPanning] = useState(false);
   const [selection, setSelection] = useState<SelectionBounds | null>(null);
   const [copiedSelection, setCopiedSelection] = useState<CopiedSelection | null>(null);
+  const [showExport, setShowExport] = useState(false);
+  const [exportMode, setExportMode] = useState<ExportMode>("scale");
+  const [exportScale, setExportScale] = useState(DEFAULT_EXPORT_SCALE);
+  const [exportDimensions, setExportDimensions] = useState({ width: 1, height: 1 });
+  const [lockExportRatio, setLockExportRatio] = useState(true);
+  const [exportError, setExportError] = useState("");
+  const [isExporting, setIsExporting] = useState(false);
   const [showInfo, setShowInfo] = useState(true);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pixelsRef = useRef(pixels);
@@ -373,7 +384,7 @@ function App() {
       event.button === 2 ||
       tool === "pan" ||
       (event.button === 0 && spacePressedRef.current);
-    const shouldSelect = event.button === 0 && !shouldPan && tool === "lasso";
+    const shouldSelect = event.button === 0 && !shouldPan && tool === "select";
     const shouldDraw = event.button === 0 && !shouldPan && !shouldSelect;
     if (!shouldPan && !shouldDraw && !shouldSelect) return;
 
@@ -774,6 +785,31 @@ function App() {
         height: (selection.maxY - selection.minY + 1) * viewport.zoom,
       }
     : null;
+  const selectionSize = selection
+    ? { width: selection.maxX - selection.minX + 1, height: selection.maxY - selection.minY + 1 }
+    : null;
+  const maxExportScale = selectionSize
+    ? Math.max(
+        1,
+        Math.min(
+          MAX_EXPORT_SCALE,
+          Math.floor(MAX_EXPORT_DIMENSION / selectionSize.width),
+          Math.floor(MAX_EXPORT_DIMENSION / selectionSize.height),
+        ),
+      )
+    : MAX_EXPORT_SCALE;
+  const exportOutputSize = selectionSize
+    ? exportMode === "scale"
+      ? { width: selectionSize.width * exportScale, height: selectionSize.height * exportScale }
+      : exportDimensions
+    : { width: 1, height: 1 };
+  const exportSizeError = !selectionSize
+    ? "No selection to export."
+    : selectionSize.width > MAX_EXPORT_DIMENSION || selectionSize.height > MAX_EXPORT_DIMENSION
+      ? `Selections must be at most ${MAX_EXPORT_DIMENSION}px per side to export.`
+      : exportOutputSize.width > MAX_EXPORT_DIMENSION || exportOutputSize.height > MAX_EXPORT_DIMENSION
+        ? `Output must be at most ${MAX_EXPORT_DIMENSION}px per side.`
+        : "";
   const selectionActionsWidth = copiedSelection ? SELECTION_ACTIONS_WITH_PASTE_WIDTH : SELECTION_ACTIONS_WIDTH;
   const selectionActionsStyle = selectionScreen
     ? {
@@ -851,7 +887,117 @@ function App() {
     setActivity(`Pasted ${changes.length} pixel${changes.length === 1 ? "" : "s"} from a ${copiedSelection.width} by ${copiedSelection.height} copy.`);
   };
 
+  const openExportPanel = () => {
+    if (!selectionSize) return;
+    const scale = Math.min(DEFAULT_EXPORT_SCALE, maxExportScale);
+    setExportMode("scale");
+    setExportScale(scale);
+    setExportDimensions({ width: selectionSize.width * scale, height: selectionSize.height * scale });
+    setLockExportRatio(true);
+    setExportError("");
+    setShowExport(true);
+  };
+
+  const closeExportPanel = () => {
+    setShowExport(false);
+    setSelection(null);
+    setExportError("");
+    setActivity("Export cancelled.");
+  };
+
+  const updateExportWidth = (value: number) => {
+    if (!selectionSize) return;
+    let width = Math.min(MAX_EXPORT_DIMENSION, Math.max(1, Math.round(value) || 1));
+    let height = lockExportRatio
+      ? Math.max(1, Math.round(width * (selectionSize.height / selectionSize.width)))
+      : exportDimensions.height;
+    if (height > MAX_EXPORT_DIMENSION) {
+      height = MAX_EXPORT_DIMENSION;
+      width = Math.max(1, Math.round(height * (selectionSize.width / selectionSize.height)));
+    }
+    setExportDimensions({ width, height });
+    setExportError("");
+  };
+
+  const updateExportHeight = (value: number) => {
+    if (!selectionSize) return;
+    let height = Math.min(MAX_EXPORT_DIMENSION, Math.max(1, Math.round(value) || 1));
+    let width = lockExportRatio
+      ? Math.max(1, Math.round(height * (selectionSize.width / selectionSize.height)))
+      : exportDimensions.width;
+    if (width > MAX_EXPORT_DIMENSION) {
+      width = MAX_EXPORT_DIMENSION;
+      height = Math.max(1, Math.round(width * (selectionSize.height / selectionSize.width)));
+    }
+    setExportDimensions({ width, height });
+    setExportError("");
+  };
+
+  const updateExportRatioLock = (locked: boolean) => {
+    setLockExportRatio(locked);
+    if (!locked || !selectionSize) return;
+    let width = exportDimensions.width;
+    let height = Math.max(1, Math.round(width * (selectionSize.height / selectionSize.width)));
+    if (height > MAX_EXPORT_DIMENSION) {
+      height = MAX_EXPORT_DIMENSION;
+      width = Math.max(1, Math.round(height * (selectionSize.width / selectionSize.height)));
+    }
+    setExportDimensions({ width, height });
+  };
+
+  const exportSelectionAsPng = async () => {
+    if (!selection || !selectionSize || exportSizeError) return;
+    setIsExporting(true);
+    setExportError("");
+    try {
+      const sourceCanvas = document.createElement("canvas");
+      sourceCanvas.width = selectionSize.width;
+      sourceCanvas.height = selectionSize.height;
+      const sourceContext = sourceCanvas.getContext("2d");
+      if (!sourceContext) throw new Error("Could not create the export canvas");
+
+      for (const [key, color] of pixelsRef.current) {
+        const [x, y] = key.split(",").map(Number);
+        if (x < selection.minX || x > selection.maxX || y < selection.minY || y > selection.maxY) continue;
+        sourceContext.fillStyle = color;
+        sourceContext.fillRect(x - selection.minX, y - selection.minY, 1, 1);
+      }
+
+      const outputCanvas = document.createElement("canvas");
+      outputCanvas.width = exportOutputSize.width;
+      outputCanvas.height = exportOutputSize.height;
+      const outputContext = outputCanvas.getContext("2d");
+      if (!outputContext) throw new Error("Could not create the scaled export canvas");
+      outputContext.imageSmoothingEnabled = false;
+      outputContext.drawImage(sourceCanvas, 0, 0, exportOutputSize.width, exportOutputSize.height);
+
+      const blob = await new Promise<Blob>((resolve, reject) => {
+        outputCanvas.toBlob((result) => {
+          if (result) resolve(result);
+          else reject(new Error("Could not encode the PNG"));
+        }, "image/png");
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `mcpixels-${exportOutputSize.width}x${exportOutputSize.height}.png`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+      setShowExport(false);
+      setSelection(null);
+      setActivity(`Exported a ${exportOutputSize.width} by ${exportOutputSize.height} PNG.`);
+    } catch (error) {
+      console.error("Could not export the MCPixels selection", error);
+      setExportError(error instanceof Error ? error.message : "Could not export the selection");
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   const dismissSelection = () => {
+    setShowExport(false);
     setSelection(null);
     setActivity("Selection dismissed.");
   };
@@ -872,7 +1018,7 @@ function App() {
         {showInfo ? (
           <aside className="info-card">
             <button type="button" aria-label="Hide instructions" onClick={() => setShowInfo(false)}>×</button>
-            <p>Draw with Pencil, or drag a rectangle with Lasso. Use Hand to pan and pinch to zoom on touch screens.</p>
+            <p>Use Select for rectangular edits. On touch screens, use Pan to move and pinch to zoom.</p>
           </aside>
         ) : (
           <button className="show-info" type="button" onClick={() => setShowInfo(true)}>Show info</button>
@@ -914,7 +1060,7 @@ function App() {
           <fieldset className="mode-control">
             <legend>Tool</legend>
             <div className="segmented-control">
-              {(["paint", "erase", "pan", "lasso"] as Tool[]).map((mode) => (
+              {(["paint", "erase", "pan", "select"] as Tool[]).map((mode) => (
                 <button
                   key={mode}
                   className={tool === mode ? "segment segment--active" : "segment"}
@@ -922,7 +1068,7 @@ function App() {
                   aria-pressed={tool === mode}
                   onClick={() => setTool(mode)}
                 >
-                  {mode === "paint" ? "Pencil" : mode === "erase" ? "Eraser" : mode === "pan" ? "Hand" : "Lasso"}
+                  {mode === "paint" ? "Draw" : mode === "erase" ? "Erase" : mode === "pan" ? "Pan" : "Select"}
                 </button>
               ))}
             </div>
@@ -956,7 +1102,7 @@ function App() {
           </button>
         </div>
 
-        <div className="canvas-column">
+        <div className={`canvas-column${showExport ? " canvas-column--exporting" : ""}`}>
           <canvas
             ref={canvasRef}
             className={`pixel-canvas pixel-canvas--${tool}${isPanning ? " pixel-canvas--panning" : ""}`}
@@ -1022,11 +1168,10 @@ function App() {
                   </button>
                 ) : null}
                 <button
-                  className="selection-action--placeholder"
                   type="button"
-                  onClick={dismissSelection}
-                  aria-label="Export selection (coming soon)"
-                  title="Export coming soon"
+                  onClick={openExportPanel}
+                  aria-label="Export selection"
+                  title="Export selection"
                 >
                   <svg viewBox="0 0 16 16" aria-hidden="true">
                     <path d="M8 2v8m-3-3 3 3 3-3M3 11v2.5h10V11" />
@@ -1040,6 +1185,124 @@ function App() {
                 </button>
               </div>
             </>
+          ) : null}
+          {showExport && selectionSize ? (
+            <div
+              className="export-layer"
+              onPointerDown={(event) => {
+                if (event.target === event.currentTarget) closeExportPanel();
+              }}
+            >
+              <section
+                className="export-panel"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="export-title"
+                tabIndex={-1}
+                autoFocus
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") closeExportPanel();
+                }}
+              >
+                <header>
+                  <div>
+                    <span>PNG export</span>
+                    <h2 id="export-title">Export selection</h2>
+                  </div>
+                  <button type="button" onClick={closeExportPanel} aria-label="Cancel export">×</button>
+                </header>
+
+                <div className="export-mode" role="group" aria-label="Export sizing mode">
+                  {(["scale", "dimensions"] as ExportMode[]).map((mode) => (
+                    <button
+                      key={mode}
+                      className={exportMode === mode ? "export-mode--active" : ""}
+                      type="button"
+                      aria-pressed={exportMode === mode}
+                      onClick={() => {
+                        setExportMode(mode);
+                        setExportError("");
+                      }}
+                    >
+                      {mode === "scale" ? "Scale" : "Dimensions"}
+                    </button>
+                  ))}
+                </div>
+
+                {exportMode === "scale" ? (
+                  <label className="export-scale">
+                    <span>Multiplier</span>
+                    <div>
+                      <input
+                        type="number"
+                        min="1"
+                        max={maxExportScale}
+                        step="1"
+                        value={exportScale}
+                        onChange={(event) => {
+                          const scale = Math.min(maxExportScale, Math.max(1, Math.round(event.target.valueAsNumber) || 1));
+                          setExportScale(scale);
+                          setExportError("");
+                        }}
+                      />
+                      <span>×</span>
+                    </div>
+                  </label>
+                ) : (
+                  <div className="export-dimensions">
+                    <label>
+                      <span>Width</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max={MAX_EXPORT_DIMENSION}
+                        step="1"
+                        value={exportDimensions.width}
+                        onChange={(event) => updateExportWidth(event.target.valueAsNumber)}
+                      />
+                    </label>
+                    <span aria-hidden="true">×</span>
+                    <label>
+                      <span>Height</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max={MAX_EXPORT_DIMENSION}
+                        step="1"
+                        value={exportDimensions.height}
+                        onChange={(event) => updateExportHeight(event.target.valueAsNumber)}
+                      />
+                    </label>
+                    <label className="export-ratio-lock">
+                      <input
+                        type="checkbox"
+                        checked={lockExportRatio}
+                        onChange={(event) => updateExportRatioLock(event.target.checked)}
+                      />
+                      Lock ratio
+                    </label>
+                  </div>
+                )}
+
+                <div className="export-summary">
+                  <span>Selection {selectionSize.width} × {selectionSize.height}px</span>
+                  <strong>{exportOutputSize.width} × {exportOutputSize.height}px</strong>
+                </div>
+                {exportSizeError || exportError ? <p className="export-error">{exportSizeError || exportError}</p> : null}
+
+                <footer>
+                  <button type="button" onClick={closeExportPanel}>Cancel</button>
+                  <button
+                    className="export-download"
+                    type="button"
+                    disabled={Boolean(exportSizeError) || isExporting}
+                    onClick={() => void exportSelectionAsPng()}
+                  >
+                    {isExporting ? "Exporting..." : "Download PNG"}
+                  </button>
+                </footer>
+              </section>
+            </div>
           ) : null}
           <footer className="canvas-meta">
             <span>{Math.round(viewport.x)}, {Math.round(viewport.y)}</span>
