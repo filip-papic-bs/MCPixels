@@ -18,6 +18,12 @@ const SELECTION_ACTIONS_GAP = 8;
 const DEFAULT_EXPORT_SCALE = 8;
 const MAX_EXPORT_SCALE = 64;
 const MAX_EXPORT_DIMENSION = 4096;
+const MAX_IMPORT_SOURCE_DIMENSION = 4096;
+const MAX_IMPORT_DIMENSION = 256;
+const IMPORT_ALPHA_THRESHOLD = 128;
+const IMPORT_MATCH_TOLERANCE = 16;
+const MIN_IMPORT_CELL_SIZE = 2;
+const IMPORT_EDGE_CELL_BIAS = 0.15;
 const HISTORY_LIMIT = 100;
 const MAX_FILL_PIXELS = 50_000;
 const MAX_SHAPE_PIXELS = 50_000;
@@ -59,6 +65,19 @@ type Tool = ColorTool | "erase" | "picker" | "pan" | "select";
 type ShapeStyle = "outline" | "filled";
 type Symmetry = { horizontal: boolean; vertical: boolean };
 type ExportMode = "scale" | "dimensions";
+type ImportGrid = {
+  columns: number;
+  rows: number;
+  originX: number;
+  originY: number;
+  pitch: number;
+};
+type ImportSource = ImportGrid & {
+  name: string;
+  data: Uint8ClampedArray;
+  width: number;
+  height: number;
+};
 type FillResult = {
   changes: PixelChange[];
   reason?: "same-color" | "open-area" | "too-large";
@@ -477,6 +496,295 @@ function pixelsInShape(
   return applySymmetry(changes, symmetry, MAX_SHAPE_PIXELS);
 }
 
+function sourcePixelDistance(data: Uint8ClampedArray, a: number, b: number) {
+  const alphaDistance = Math.abs(data[a + 3] - data[b + 3]);
+  if (data[a + 3] < IMPORT_ALPHA_THRESHOLD && data[b + 3] < IMPORT_ALPHA_THRESHOLD) return alphaDistance;
+  return Math.max(
+    alphaDistance,
+    Math.abs(data[a] - data[b]),
+    Math.abs(data[a + 1] - data[b + 1]),
+    Math.abs(data[a + 2] - data[b + 2]),
+  );
+}
+
+function lineBreaks(
+  data: Uint8ClampedArray,
+  size: number,
+  otherSize: number,
+  indexOf: (line: number, offset: number) => number,
+) {
+  const isBreak = new Uint8Array(size);
+  const energy = new Float64Array(size);
+  for (let line = 1; line < size; line += 1) {
+    let peak = 0;
+    let total = 0;
+    for (let offset = 0; offset < otherSize; offset += 1) {
+      const distance = sourcePixelDistance(data, indexOf(line - 1, offset), indexOf(line, offset));
+      if (distance > peak) peak = distance;
+      total += distance;
+    }
+    isBreak[line] = peak > IMPORT_MATCH_TOLERANCE ? 1 : 0;
+    energy[line] = total;
+  }
+  let drift = 0;
+  for (let offset = 0; offset < otherSize; offset += 1) {
+    drift = Math.max(drift, sourcePixelDistance(data, indexOf(0, offset), indexOf(size - 1, offset)));
+  }
+  return { isBreak, energy, drift };
+}
+
+function breakCenters(isBreak: Uint8Array, energy: Float64Array) {
+  const centers: number[] = [];
+  let widest = 0;
+  let start = -1;
+  for (let line = 0; line <= isBreak.length; line += 1) {
+    if (line < isBreak.length && isBreak[line]) {
+      if (start < 0) start = line;
+      continue;
+    }
+    if (start < 0) continue;
+    let weight = 0;
+    let weighted = 0;
+    for (let inner = start; inner < line; inner += 1) {
+      weight += energy[inner];
+      weighted += energy[inner] * inner;
+    }
+    centers.push(weight > 0 ? weighted / weight : start);
+    widest = Math.max(widest, line - start);
+    start = -1;
+  }
+  return { centers, widest };
+}
+
+function gridFit(centers: number[], pitch: number) {
+  let sines = 0;
+  let cosines = 0;
+  for (const center of centers) {
+    const angle = (Math.PI * 2 * center) / pitch;
+    sines += Math.sin(angle);
+    cosines += Math.cos(angle);
+  }
+  const phase = (Math.atan2(sines, cosines) * pitch) / (Math.PI * 2);
+  let worst = 0;
+  let total = 0;
+  for (const center of centers) {
+    const offset = center - phase;
+    const residual = Math.abs(offset - Math.round(offset / pitch) * pitch);
+    if (residual > worst) worst = residual;
+    total += residual;
+  }
+  return { phase, worst, mean: total / centers.length };
+}
+
+function fitPitch(centers: number[], count: number, pitch: number, phase: number) {
+  let indexTotal = 0;
+  let centerTotal = 0;
+  let squareTotal = 0;
+  let productTotal = 0;
+  for (let entry = 0; entry < count; entry += 1) {
+    const index = Math.round((centers[entry] - phase) / pitch);
+    indexTotal += index;
+    centerTotal += centers[entry];
+    squareTotal += index * index;
+    productTotal += index * centers[entry];
+  }
+  const spread = count * squareTotal - indexTotal * indexTotal;
+  if (spread === 0) return null;
+  const next = (count * productTotal - indexTotal * centerTotal) / spread;
+  if (!(next > 0)) return null;
+  return { pitch: next, phase: (centerTotal - next * indexTotal) / count };
+}
+
+function refinePitch(centers: number[], guess: number) {
+  let pitch = guess;
+  let phase = centers[0];
+  for (let count = Math.min(centers.length, 4); ; count = Math.min(centers.length, count * 2)) {
+    for (let pass = 0; pass < 3; pass += 1) {
+      const fit = fitPitch(centers, count, pitch, phase);
+      if (!fit) break;
+      const settled = Math.abs(fit.pitch - pitch) < 1e-6;
+      pitch = fit.pitch;
+      phase = fit.phase;
+      if (settled) break;
+    }
+    if (count >= centers.length) return pitch;
+  }
+}
+
+function pitchCandidates(centers: number[]) {
+  if (centers.length < 2) return [];
+  const gaps: number[] = [];
+  for (let index = 1; index < centers.length; index += 1) gaps.push(centers[index] - centers[index - 1]);
+  gaps.sort((a, b) => a - b);
+  const guesses = [gaps[0], gaps[Math.floor(gaps.length / 2)]];
+  return guesses
+    .filter((guess) => guess >= MIN_IMPORT_CELL_SIZE)
+    .map((guess) => refinePitch(centers, guess))
+    .filter((pitch) => pitch >= MIN_IMPORT_CELL_SIZE);
+}
+
+function axisAccepts(breaks: { centers: number[]; widest: number }, pitch: number) {
+  if (breaks.centers.length === 0) return { origin: 0 };
+  if (breaks.widest > pitch * 0.85) return null;
+  const fit = gridFit(breaks.centers, pitch);
+  if (fit.worst > Math.min(pitch * 0.25, Math.max(0.85, pitch * 0.08))) return null;
+  if (fit.mean > Math.min(pitch * 0.12, Math.max(0.35, pitch * 0.04))) return null;
+  return { origin: fit.phase };
+}
+
+function detectPixelGrid(data: Uint8ClampedArray, width: number, height: number): ImportGrid {
+  const fullSize = { columns: width, rows: height, originX: 0, originY: 0, pitch: 1 };
+  const columnLines = lineBreaks(data, width, height, (x, y) => (y * width + x) * 4);
+  const rowLines = lineBreaks(data, height, width, (y, x) => (y * width + x) * 4);
+  const columnBreaks = breakCenters(columnLines.isBreak, columnLines.energy);
+  const rowBreaks = breakCenters(rowLines.isBreak, rowLines.energy);
+
+  if (columnBreaks.centers.length === 0 && rowBreaks.centers.length === 0) {
+    const flat = columnLines.drift <= IMPORT_MATCH_TOLERANCE && rowLines.drift <= IMPORT_MATCH_TOLERANCE;
+    return flat ? { columns: 1, rows: 1, originX: 0, originY: 0, pitch: 1 } : fullSize;
+  }
+  if (columnBreaks.centers.length === 0 && columnLines.drift > IMPORT_MATCH_TOLERANCE) return fullSize;
+  if (rowBreaks.centers.length === 0 && rowLines.drift > IMPORT_MATCH_TOLERANCE) return fullSize;
+
+  const candidates = [...pitchCandidates(columnBreaks.centers), ...pitchCandidates(rowBreaks.centers)].sort(
+    (a, b) => b - a,
+  );
+  for (const pitch of candidates) {
+    const columnFit = axisAccepts(columnBreaks, pitch);
+    const rowFit = axisAccepts(rowBreaks, pitch);
+    if (!columnFit || !rowFit) continue;
+    const columns = Math.max(1, Math.round((width - columnFit.origin) / pitch + IMPORT_EDGE_CELL_BIAS));
+    const rows = Math.max(1, Math.round((height - rowFit.origin) / pitch + IMPORT_EDGE_CELL_BIAS));
+    if (columns >= width && rows >= height) break;
+    return { columns, rows, originX: columnFit.origin, originY: rowFit.origin, pitch };
+  }
+  return fullSize;
+}
+
+function rasterizeImportSource(source: ImportSource, width: number, height: number) {
+  const detected = width === source.columns && height === source.rows;
+  const cellWidth = detected ? source.pitch : source.width / width;
+  const cellHeight = detected ? source.pitch : source.height / height;
+  const originX = detected ? source.originX : 0;
+  const originY = detected ? source.originY : 0;
+  const insetX = Math.min(cellWidth / 4, 2);
+  const insetY = Math.min(cellHeight / 4, 2);
+  const changes: PixelChange[] = [];
+  const counts = new Map<number, number>();
+
+  for (let y = 0; y < height; y += 1) {
+    const topEdge = originY + y * cellHeight;
+    const top = Math.max(0, Math.min(source.height - 1, Math.floor(topEdge + insetY)));
+    const bottom = Math.max(top, Math.min(source.height - 1, Math.ceil(topEdge + cellHeight - insetY) - 1));
+    for (let x = 0; x < width; x += 1) {
+      const leftEdge = originX + x * cellWidth;
+      const left = Math.max(0, Math.min(source.width - 1, Math.floor(leftEdge + insetX)));
+      const right = Math.max(left, Math.min(source.width - 1, Math.ceil(leftEdge + cellWidth - insetX) - 1));
+
+      counts.clear();
+      let bestColor = -1;
+      let bestCount = 0;
+      for (let sourceY = top; sourceY <= bottom; sourceY += 1) {
+        for (let sourceX = left; sourceX <= right; sourceX += 1) {
+          const index = (sourceY * source.width + sourceX) * 4;
+          const color =
+            source.data[index + 3] < IMPORT_ALPHA_THRESHOLD
+              ? -1
+              : (source.data[index] << 16) | (source.data[index + 1] << 8) | source.data[index + 2];
+          const count = (counts.get(color) ?? 0) + 1;
+          counts.set(color, count);
+          if (count > bestCount) {
+            bestCount = count;
+            bestColor = color;
+          }
+        }
+      }
+      if (bestColor < 0) continue;
+      changes.push({ x, y, color: `#${(bestColor | 0x1000000).toString(16).slice(1)}` });
+    }
+  }
+  return changes;
+}
+
+function fitImportDimensions(width: number, height: number) {
+  const factor = Math.min(1, MAX_IMPORT_DIMENSION / width, MAX_IMPORT_DIMENSION / height);
+  if (factor >= 1) return { width, height };
+  return {
+    width: Math.max(1, Math.floor(width * factor)),
+    height: Math.max(1, Math.floor(height * factor)),
+  };
+}
+
+async function decodeImageFile(file: File) {
+  if (typeof createImageBitmap === "function") {
+    const bitmap = await createImageBitmap(file);
+    return { image: bitmap as CanvasImageSource, width: bitmap.width, height: bitmap.height, release: () => bitmap.close() };
+  }
+  const url = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    return {
+      image: image as CanvasImageSource,
+      width: image.naturalWidth,
+      height: image.naturalHeight,
+      release: () => URL.revokeObjectURL(url),
+    };
+  } catch (error) {
+    URL.revokeObjectURL(url);
+    throw error;
+  }
+}
+
+async function readImportSource(file: File): Promise<ImportSource> {
+  if (file.type && !file.type.startsWith("image/")) throw new Error("That file is not an image.");
+  const decoded = await decodeImageFile(file);
+  try {
+    const { width, height } = decoded;
+    if (!width || !height) throw new Error("That image has no pixels to import.");
+    if (width > MAX_IMPORT_SOURCE_DIMENSION || height > MAX_IMPORT_SOURCE_DIMENSION) {
+      throw new Error(`Images must be at most ${MAX_IMPORT_SOURCE_DIMENSION}px per side.`);
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("Could not create the import canvas");
+    context.imageSmoothingEnabled = false;
+    context.drawImage(decoded.image, 0, 0);
+    const { data } = context.getImageData(0, 0, width, height);
+    return { name: file.name || "pasted image", data, width, height, ...detectPixelGrid(data, width, height) };
+  } finally {
+    decoded.release();
+  }
+}
+
+function importOriginFor(selection: SelectionBounds | null, viewport: Viewport, width: number, height: number) {
+  const clamp = (value: number, size: number) =>
+    Math.max(-MAX_TOOL_COORDINATE, Math.min(MAX_TOOL_COORDINATE - size + 1, value));
+  return {
+    x: clamp(selection ? selection.minX : Math.round(viewport.x) - Math.floor(width / 2), width),
+    y: clamp(selection ? selection.minY : Math.round(viewport.y) - Math.floor(height / 2), height),
+  };
+}
+
+function findImageFile(files: FileList | null | undefined, items?: DataTransferItemList | null) {
+  for (const file of Array.from(files ?? [])) {
+    if (file.type.startsWith("image/")) return file;
+  }
+  for (const item of Array.from(items ?? [])) {
+    if (item.kind !== "file" || !item.type.startsWith("image/")) continue;
+    const file = item.getAsFile();
+    if (file) return file;
+  }
+  return null;
+}
+
+function carriesFiles(transfer: DataTransfer | null) {
+  return Array.from(transfer?.types ?? []).includes("Files");
+}
+
 function App() {
   const [initialState] = useState(loadPersistedState);
   const [pixelHistory, dispatch] = useReducer(pixelReducer, {
@@ -507,7 +815,15 @@ function App() {
   const [lockExportRatio, setLockExportRatio] = useState(true);
   const [exportError, setExportError] = useState("");
   const [isExporting, setIsExporting] = useState(false);
+  const [showImport, setShowImport] = useState(false);
+  const [importSource, setImportSource] = useState<ImportSource | null>(null);
+  const [importDimensions, setImportDimensions] = useState({ width: 1, height: 1 });
+  const [lockImportRatio, setLockImportRatio] = useState(true);
+  const [importError, setImportError] = useState("");
+  const [isReadingImport, setIsReadingImport] = useState(false);
+  const [isDropTarget, setIsDropTarget] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
   const pixelsRef = useRef(pixels);
   const viewportRef = useRef(viewport);
   const pointerRef = useRef<PointerState>(null);
@@ -560,6 +876,7 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const panelOpen = showExport || showImport;
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const isTyping = target?.matches("input, textarea, select") || target?.isContentEditable;
@@ -568,20 +885,20 @@ function App() {
       const wantsUndo = modifierPressed && key === "z" && !event.shiftKey;
       const wantsRedo = modifierPressed && ((key === "z" && event.shiftKey) || key === "y");
 
-      if (!showExport && !isTyping && wantsUndo && pixelHistory.undoStack.length > 0) {
+      if (!panelOpen && !isTyping && wantsUndo && pixelHistory.undoStack.length > 0) {
         event.preventDefault();
         dispatch({ type: "undo" });
         setActivity("Undid the last pixel edit.");
         return;
       }
-      if (!showExport && !isTyping && wantsRedo && pixelHistory.redoStack.length > 0) {
+      if (!panelOpen && !isTyping && wantsRedo && pixelHistory.redoStack.length > 0) {
         event.preventDefault();
         dispatch({ type: "redo" });
         setActivity("Redid the last pixel edit.");
         return;
       }
       const shortcutTool = !modifierPressed && !event.altKey ? TOOL_SHORTCUTS[key] : undefined;
-      if (!showExport && !isTyping && !event.repeat && shortcutTool) {
+      if (!panelOpen && !isTyping && !event.repeat && shortcutTool) {
         event.preventDefault();
         if (shortcutTool === "picker" && tool !== "picker") {
           toolBeforePickerRef.current = isColorTool(tool) ? tool : "paint";
@@ -608,7 +925,7 @@ function App() {
       window.removeEventListener("keyup", handleKeyUp);
       window.removeEventListener("blur", handleBlur);
     };
-  }, [pixelHistory.redoStack.length, pixelHistory.undoStack.length, showExport, tool]);
+  }, [pixelHistory.redoStack.length, pixelHistory.undoStack.length, showExport, showImport, tool]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1367,6 +1684,18 @@ function App() {
       : exportOutputSize.width > MAX_EXPORT_DIMENSION || exportOutputSize.height > MAX_EXPORT_DIMENSION
         ? `Output must be at most ${MAX_EXPORT_DIMENSION}px per side.`
         : "";
+  const importDetectedSize = importSource ? { width: importSource.columns, height: importSource.rows } : null;
+  const importFoundGrid = Boolean(
+    importSource && (importSource.columns < importSource.width || importSource.rows < importSource.height),
+  );
+  const importFittedSize = importDetectedSize
+    ? fitImportDimensions(importDetectedSize.width, importDetectedSize.height)
+    : null;
+  const importSizeError =
+    importSource && (importDimensions.width > MAX_IMPORT_DIMENSION || importDimensions.height > MAX_IMPORT_DIMENSION)
+      ? `Imports must be at most ${MAX_IMPORT_DIMENSION} pixels per side.`
+      : "";
+  const importOrigin = importOriginFor(selection, viewport, importDimensions.width, importDimensions.height);
   const selectionActionsWidth = copiedSelection ? SELECTION_ACTIONS_WITH_PASTE_WIDTH : SELECTION_ACTIONS_WIDTH;
   const selectionActionsStyle = selectionScreen
     ? {
@@ -1598,6 +1927,120 @@ function App() {
     }
   };
 
+  const readImportFile = async (file: File | null) => {
+    if (!file) return;
+    setShowExport(false);
+    setShowImport(true);
+    setImportSource(null);
+    setImportError("");
+    setIsReadingImport(true);
+    try {
+      const source = await readImportSource(file);
+      setImportSource(source);
+      setImportDimensions(fitImportDimensions(source.columns, source.rows));
+      setLockImportRatio(true);
+      setActivity(
+        source.columns < source.width || source.rows < source.height
+          ? `Read ${source.name}: ${source.width} by ${source.height} pixels holding a ${source.columns} by ${source.rows} pixel grid.`
+          : `Read ${source.name}: ${source.width} by ${source.height} pixels, no pixel grid detected.`,
+      );
+    } catch (error) {
+      console.error("Could not read the image to import", error);
+      setImportError(error instanceof Error ? error.message : "Could not read that image");
+    } finally {
+      setIsReadingImport(false);
+    }
+  };
+
+  useEffect(() => {
+    const handlePaste = (event: ClipboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.matches("input, textarea, select") || target?.isContentEditable) return;
+      const file = findImageFile(event.clipboardData?.files, event.clipboardData?.items);
+      if (!file) return;
+      event.preventDefault();
+      void readImportFile(file);
+    };
+    const blockFileDrop = (event: DragEvent) => {
+      if (carriesFiles(event.dataTransfer)) event.preventDefault();
+    };
+    window.addEventListener("paste", handlePaste);
+    window.addEventListener("dragover", blockFileDrop);
+    window.addEventListener("drop", blockFileDrop);
+    return () => {
+      window.removeEventListener("paste", handlePaste);
+      window.removeEventListener("dragover", blockFileDrop);
+      window.removeEventListener("drop", blockFileDrop);
+    };
+  }, []);
+
+  const updateImportWidth = (value: number) => {
+    if (!importDetectedSize) return;
+    let width = Math.min(MAX_IMPORT_DIMENSION, Math.max(1, Math.round(value) || 1));
+    let height = lockImportRatio
+      ? Math.max(1, Math.round(width * (importDetectedSize.height / importDetectedSize.width)))
+      : importDimensions.height;
+    if (height > MAX_IMPORT_DIMENSION) {
+      height = MAX_IMPORT_DIMENSION;
+      width = Math.max(1, Math.round(height * (importDetectedSize.width / importDetectedSize.height)));
+    }
+    setImportDimensions({ width, height });
+    setImportError("");
+  };
+
+  const updateImportHeight = (value: number) => {
+    if (!importDetectedSize) return;
+    let height = Math.min(MAX_IMPORT_DIMENSION, Math.max(1, Math.round(value) || 1));
+    let width = lockImportRatio
+      ? Math.max(1, Math.round(height * (importDetectedSize.width / importDetectedSize.height)))
+      : importDimensions.width;
+    if (width > MAX_IMPORT_DIMENSION) {
+      width = MAX_IMPORT_DIMENSION;
+      height = Math.max(1, Math.round(width * (importDetectedSize.height / importDetectedSize.width)));
+    }
+    setImportDimensions({ width, height });
+    setImportError("");
+  };
+
+  const updateImportRatioLock = (locked: boolean) => {
+    setLockImportRatio(locked);
+    if (!locked || !importDetectedSize) return;
+    let width = importDimensions.width;
+    let height = Math.max(1, Math.round(width * (importDetectedSize.height / importDetectedSize.width)));
+    if (height > MAX_IMPORT_DIMENSION) {
+      height = MAX_IMPORT_DIMENSION;
+      width = Math.max(1, Math.round(height * (importDetectedSize.width / importDetectedSize.height)));
+    }
+    setImportDimensions({ width, height });
+  };
+
+  const closeImportPanel = () => {
+    setShowImport(false);
+    setImportSource(null);
+    setImportError("");
+    setActivity("Import cancelled.");
+  };
+
+  const placeImportedImage = () => {
+    if (!importSource || importSizeError) return;
+    const { width, height } = importDimensions;
+    const origin = importOriginFor(selection, viewport, width, height);
+    const changes = rasterizeImportSource(importSource, width, height).map(({ x, y, color }) => ({
+      x: origin.x + x,
+      y: origin.y + y,
+      color,
+    }));
+    if (changes.length === 0) {
+      setImportError("Every pixel in that image is transparent.");
+      return;
+    }
+    dispatch({ type: "paint", changes });
+    setSelection({ minX: origin.x, minY: origin.y, maxX: origin.x + width - 1, maxY: origin.y + height - 1 });
+    setShowImport(false);
+    setImportSource(null);
+    setActivity(`Imported ${changes.length} pixel${changes.length === 1 ? "" : "s"} as a ${width} by ${height} image at (${origin.x}, ${origin.y}).`);
+  };
+
   const dismissSelection = () => {
     setShowExport(false);
     setSelection(null);
@@ -1818,19 +2261,59 @@ function App() {
             </div>
           </fieldset>
 
-          <button
-            className="clear-button"
-            type="button"
-            onClick={() => {
-              dispatch({ type: "clear" });
-              setActivity("You cleared the canvas.");
+          <div className="file-actions">
+            <button
+              className="import-button"
+              type="button"
+              title="Import an image (drop or paste one too)"
+              onClick={() => importInputRef.current?.click()}
+            >
+              Import
+            </button>
+            <button
+              className="clear-button"
+              type="button"
+              onClick={() => {
+                dispatch({ type: "clear" });
+                setActivity("You cleared the canvas.");
+              }}
+            >
+              Clear all
+            </button>
+          </div>
+          <input
+            ref={importInputRef}
+            hidden
+            type="file"
+            accept="image/*"
+            aria-label="Import an image onto the canvas"
+            onChange={(event) => {
+              const file = event.target.files?.[0] ?? null;
+              event.target.value = "";
+              void readImportFile(file);
             }}
-          >
-            Clear all
-          </button>
+          />
         </div>
 
-        <div className={`canvas-column${showExport ? " canvas-column--exporting" : ""}`}>
+        <div
+          className={`canvas-column${showExport || showImport ? " canvas-column--exporting" : ""}${isDropTarget ? " canvas-column--dropping" : ""}`}
+          onDragOver={(event) => {
+            if (!carriesFiles(event.dataTransfer)) return;
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "copy";
+            setIsDropTarget(true);
+          }}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setIsDropTarget(false);
+          }}
+          onDrop={(event) => {
+            const file = findImageFile(event.dataTransfer.files, event.dataTransfer.items);
+            event.preventDefault();
+            setIsDropTarget(false);
+            if (file) void readImportFile(file);
+            else setActivity("Only image files can be dropped onto the canvas.");
+          }}
+        >
           <canvas
             ref={canvasRef}
             className={`pixel-canvas pixel-canvas--${tool}${isPanning ? " pixel-canvas--panning" : ""}${movingSelection ? " pixel-canvas--moving" : ""}`}
@@ -2062,6 +2545,114 @@ function App() {
                     onClick={() => void exportSelectionAsPng()}
                   >
                     {isExporting ? "Exporting..." : "Download PNG"}
+                  </button>
+                </footer>
+              </section>
+            </div>
+          ) : null}
+          {showImport ? (
+            <div
+              className="export-layer"
+              onPointerDown={(event) => {
+                if (event.target === event.currentTarget) closeImportPanel();
+              }}
+            >
+              <section
+                className="export-panel"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="import-title"
+                tabIndex={-1}
+                autoFocus
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") closeImportPanel();
+                }}
+              >
+                <header>
+                  <div>
+                    <span>Image import</span>
+                    <h2 id="import-title">Place image</h2>
+                  </div>
+                  <button type="button" onClick={closeImportPanel} aria-label="Cancel import">×</button>
+                </header>
+
+                {importSource && importDetectedSize && importFittedSize ? (
+                  <>
+                    <p className="import-note">
+                      <strong>{importSource.name}</strong>
+                      <span>
+                        {importSource.width} × {importSource.height}px source ·{" "}
+                        {importFoundGrid
+                          ? `pixel grid detected at ${importDetectedSize.width} × ${importDetectedSize.height}, about ${importSource.pitch.toFixed(1)}px per art pixel`
+                          : "no pixel grid detected, importing one canvas pixel per image pixel"}
+                      </span>
+                    </p>
+
+                    <div className="export-dimensions">
+                      <label>
+                        <span>Width</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max={MAX_IMPORT_DIMENSION}
+                          step="1"
+                          value={importDimensions.width}
+                          onChange={(event) => updateImportWidth(event.target.valueAsNumber)}
+                        />
+                      </label>
+                      <span aria-hidden="true">×</span>
+                      <label>
+                        <span>Height</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max={MAX_IMPORT_DIMENSION}
+                          step="1"
+                          value={importDimensions.height}
+                          onChange={(event) => updateImportHeight(event.target.valueAsNumber)}
+                        />
+                      </label>
+                      <label className="export-ratio-lock">
+                        <input
+                          type="checkbox"
+                          checked={lockImportRatio}
+                          onChange={(event) => updateImportRatioLock(event.target.checked)}
+                        />
+                        Lock ratio
+                      </label>
+                    </div>
+
+                    {importDimensions.width !== importFittedSize.width ||
+                    importDimensions.height !== importFittedSize.height ? (
+                      <button className="import-reset" type="button" onClick={() => setImportDimensions(importFittedSize)}>
+                        Reset to {importFittedSize.width} × {importFittedSize.height}
+                      </button>
+                    ) : null}
+
+                    <div className="export-summary">
+                      <span>
+                        {selection ? "Top-left of the selection" : "Centered on the view"} at ({importOrigin.x}, {importOrigin.y})
+                      </span>
+                      <strong>{importDimensions.width} × {importDimensions.height}px</strong>
+                    </div>
+                  </>
+                ) : (
+                  <p className="import-note">
+                    <span>{isReadingImport ? "Reading the image…" : "No image loaded."}</span>
+                  </p>
+                )}
+
+                {importSizeError || importError ? <p className="export-error">{importSizeError || importError}</p> : null}
+
+                <footer>
+                  <button type="button" onClick={closeImportPanel}>Cancel</button>
+                  <button
+                    className="export-download"
+                    type="button"
+                    disabled={!importSource || Boolean(importSizeError) || isReadingImport}
+                    onClick={placeImportedImage}
+                  >
+                    Place pixels
                   </button>
                 </footer>
               </section>

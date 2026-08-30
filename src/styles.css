@@ -244,6 +244,7 @@ legend {
 .segment,
 .history-buttons button,
 .zoom-buttons button,
+.import-button,
 .clear-button {
   display: grid;
   min-width: 0;
@@ -281,6 +282,7 @@ legend {
 .segment,
 .history-buttons button,
 .zoom-buttons button,
+.import-button,
 .clear-button {
   cursor: pointer;
 }
@@ -323,10 +325,28 @@ legend {
   font-size: 0.57rem;
 }
 
+.file-actions {
+  display: flex;
+  gap: 7px;
+}
+
+.import-button,
 .clear-button {
   width: 100%;
   height: 34px;
   border-right: 1px solid #5c5f59;
+}
+
+.file-actions .import-button,
+.file-actions .clear-button {
+  flex: 1;
+}
+
+.import-button {
+  color: #c6c9c1;
+}
+
+.clear-button {
   color: #ff876f;
 }
 
@@ -340,6 +360,16 @@ legend {
 
 .canvas-column--exporting {
   z-index: 5;
+}
+
+.canvas-column--dropping::after {
+  position: absolute;
+  z-index: 4;
+  inset: 14px;
+  border: 2px dashed #ef5938;
+  background: rgba(239, 89, 56, 0.06);
+  content: "";
+  pointer-events: none;
 }
 
 .pixel-canvas {
@@ -601,6 +631,34 @@ legend {
   font-weight: 500;
 }
 
+.import-note {
+  display: grid;
+  gap: 5px;
+  margin: 16px 0 0;
+  color: #9ea19a;
+  font-size: 0.58rem;
+  line-height: 1.55;
+}
+
+.import-note strong {
+  overflow: hidden;
+  color: #f7f7f3;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.import-reset {
+  height: 28px;
+  margin-top: 10px;
+  padding: 0 10px;
+  border: 1px solid #5c5f59;
+  color: #c6c9c1;
+  font-size: 0.56rem;
+  background: transparent;
+  cursor: pointer;
+}
+
 .export-error {
   margin: 10px 0 0;
   color: #ff876f;
@@ -713,11 +771,11 @@ legend {
   }
 
   .zoom-control {
-    grid-column: 1 / 9;
+    grid-column: 1 / 7;
   }
 
-  .clear-button {
-    grid-column: 9 / -1;
+  .file-actions {
+    grid-column: 7 / -1;
   }
 
   .palette {
@@ -735,6 +793,8 @@ legend {
   .segmented-control,
   .history-buttons,
   .zoom-buttons,
+  .file-actions,
+  .import-button,
   .clear-button {
     height: 30px;
     align-self: end;
@@ -757,6 +817,7 @@ legend {
   .swatch,
   .segment,
   .zoom-buttons button,
+  .import-button,
   .clear-button {
     transition: transform 120ms ease;
   }
