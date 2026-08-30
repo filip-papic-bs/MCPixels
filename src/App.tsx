@@ -50,7 +50,13 @@ type PixelChange = { x: number; y: number; color: string };
 type PixelAction =
   | { type: "paint"; changes: PixelChange[]; historyGroup?: number }
   | { type: "clear-area"; bounds: SelectionBounds }
-  | { type: "move"; from: SelectionBounds; changes: PixelChange[] }
+  | {
+      type: "move";
+      from: SelectionBounds;
+      changes: PixelChange[];
+      selectionBefore: SelectionBounds;
+      selectionAfter: SelectionBounds;
+    }
   | { type: "clear" }
   | { type: "undo" }
   | { type: "redo" };
@@ -59,11 +65,13 @@ type PixelPatch = {
   before: number[];
   after: number[];
   historyGroup: number | null;
+  selectionBefore?: SelectionBounds;
+  selectionAfter?: SelectionBounds;
 };
 type HistoryState = { version: number; undoDepth: number; redoDepth: number };
 type Viewport = { x: number; y: number; zoom: number };
 type SelectionBounds = { minX: number; minY: number; maxX: number; maxY: number };
-type CopiedSelection = { pixels: PixelChange[]; width: number; height: number };
+type CopiedSelection = { pixels: PixelChange[]; width: number; height: number; origin: ScreenPoint };
 type MovingSelection = { originalBounds: SelectionBounds; captured: CopiedSelection };
 type ScreenPoint = { x: number; y: number };
 type ShapeTool = "line" | "rectangle" | "ellipse";
@@ -261,6 +269,8 @@ function applyPixelAction(store: PixelStore, action: PixelAction) {
   } else if (action.type === "move") {
     clearArea(store, patch, action.from);
     applyPixelChanges(store, patch, action.changes);
+    patch.selectionBefore = action.selectionBefore;
+    patch.selectionAfter = action.selectionAfter;
   } else {
     applyPixelChanges(store, patch, action.changes);
   }
@@ -1018,6 +1028,7 @@ function App() {
   const shapePreviewFrameRef = useRef<number | null>(null);
   const spacePressedRef = useRef(false);
   const suppressContextMenuRef = useRef(false);
+  const lastCanvasPointerRef = useRef<ScreenPoint | null>(null);
   viewportRef.current = viewport;
   canvasSizeRef.current = canvasSize;
   const fitZoom = fitZoomFor(canvasSize);
@@ -1081,58 +1092,6 @@ function App() {
       return next.x === current.x && next.y === current.y && next.zoom === current.zoom ? current : next;
     });
   }, [canvasSize]);
-
-  useEffect(() => {
-    const panelOpen = showExport || showImport;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      const isTyping = target?.matches("input, textarea, select") || target?.isContentEditable;
-      const modifierPressed = event.metaKey || event.ctrlKey;
-      const key = event.key.toLowerCase();
-      const wantsUndo = modifierPressed && key === "z" && !event.shiftKey;
-      const wantsRedo = modifierPressed && ((key === "z" && event.shiftKey) || key === "y");
-
-      if (!panelOpen && !isTyping && wantsUndo && history.undoDepth > 0) {
-        event.preventDefault();
-        dispatch({ type: "undo" });
-        setActivity("Undid the last pixel edit.");
-        return;
-      }
-      if (!panelOpen && !isTyping && wantsRedo && history.redoDepth > 0) {
-        event.preventDefault();
-        dispatch({ type: "redo" });
-        setActivity("Redid the last pixel edit.");
-        return;
-      }
-      const shortcutTool = !modifierPressed && !event.altKey ? TOOL_SHORTCUTS[key] : undefined;
-      if (!panelOpen && !isTyping && !event.repeat && shortcutTool) {
-        event.preventDefault();
-        if (shortcutTool === "picker" && tool !== "picker") {
-          toolBeforePickerRef.current = isColorTool(tool) ? tool : "paint";
-        }
-        setTool(shortcutTool);
-        setActivity(`${shortcutTool === "paint" ? "Draw" : shortcutTool[0].toUpperCase() + shortcutTool.slice(1)} tool selected.`);
-        return;
-      }
-      if (event.code !== "Space" || event.repeat || isTyping || target?.matches("button")) return;
-      spacePressedRef.current = true;
-      event.preventDefault();
-    };
-    const handleKeyUp = (event: KeyboardEvent) => {
-      if (event.code === "Space") spacePressedRef.current = false;
-    };
-    const handleBlur = () => {
-      spacePressedRef.current = false;
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("keyup", handleKeyUp);
-    window.addEventListener("blur", handleBlur);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("keyup", handleKeyUp);
-      window.removeEventListener("blur", handleBlur);
-    };
-  }, [history.redoDepth, history.undoDepth, showExport, showImport, tool]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1414,6 +1373,8 @@ function App() {
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     if (pointerRef.current && !(event.pointerType === "touch" && tool === "pan")) return;
+    const pointerPixel = getPixelAt(event.clientX, event.clientY);
+    if (pointerPixel && isOnCanvas(pointerPixel.x, pointerPixel.y)) lastCanvasPointerRef.current = pointerPixel;
     const shouldPan =
       event.button === 1 ||
       event.button === 2 ||
@@ -1483,6 +1444,8 @@ function App() {
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const pointerPixel = getPixelAt(event.clientX, event.clientY);
+    if (pointerPixel && isOnCanvas(pointerPixel.x, pointerPixel.y)) lastCanvasPointerRef.current = pointerPixel;
     if (touchPointsRef.current.has(event.pointerId)) {
       touchPointsRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
     }
@@ -1652,12 +1615,25 @@ function App() {
       const dy = pixel ? pixel.y - pointer.anchor.y : 0;
       const { originalBounds, captured } = movingSelection;
       if (dx !== 0 || dy !== 0) {
+        const nextSelection = {
+          minX: originalBounds.minX + dx,
+          minY: originalBounds.minY + dy,
+          maxX: originalBounds.maxX + dx,
+          maxY: originalBounds.maxY + dy,
+        };
         const changes = captured.pixels.map(({ x, y, color }) => ({
           x: originalBounds.minX + x + dx,
           y: originalBounds.minY + y + dy,
           color,
         }));
-        dispatch({ type: "move", from: originalBounds, changes });
+        dispatch({
+          type: "move",
+          from: originalBounds,
+          changes,
+          selectionBefore: originalBounds,
+          selectionAfter: nextSelection,
+        });
+        setSelection(nextSelection);
         setActivity(`Moved a ${captured.width} by ${captured.height} selection.`);
       }
       setMovingSelection(null);
@@ -1989,14 +1965,13 @@ function App() {
     }
     const width = selection.maxX - selection.minX + 1;
     const height = selection.maxY - selection.minY + 1;
-    return { pixels: copiedPixels, width, height };
+    return { pixels: copiedPixels, width, height, origin: { x: selection.minX, y: selection.minY } };
   };
 
   const copySelection = () => {
     const copied = captureSelection();
     if (!copied) return;
     setCopiedSelection(copied);
-    setSelection(null);
     setActivity(`Copied ${copied.pixels.length} pixel${copied.pixels.length === 1 ? "" : "s"} from a ${copied.width} by ${copied.height} selection.`);
   };
 
@@ -2006,20 +1981,66 @@ function App() {
     if (!copied) return;
     setCopiedSelection(copied);
     dispatch({ type: "clear-area", bounds: selection });
-    setSelection(null);
     setActivity(`Cut ${copied.pixels.length} pixel${copied.pixels.length === 1 ? "" : "s"} from a ${copied.width} by ${copied.height} selection.`);
   };
 
   const pasteSelection = () => {
-    if (!selection || !copiedSelection) return;
+    if (!copiedSelection) return;
+    const requestedOrigin = lastCanvasPointerRef.current ?? copiedSelection.origin;
+    const origin = {
+      x: Math.max(CANVAS_MIN, Math.min(CANVAS_MAX - copiedSelection.width + 1, requestedOrigin.x)),
+      y: Math.max(CANVAS_MIN, Math.min(CANVAS_MAX - copiedSelection.height + 1, requestedOrigin.y)),
+    };
     const changes = copiedSelection.pixels.map(({ x, y, color }) => ({
-      x: selection.minX + x,
-      y: selection.minY + y,
+      x: origin.x + x,
+      y: origin.y + y,
       color,
     }));
     if (changes.length > 0) dispatch({ type: "paint", changes });
-    setSelection(null);
-    setActivity(`Pasted ${changes.length} pixel${changes.length === 1 ? "" : "s"} from a ${copiedSelection.width} by ${copiedSelection.height} copy.`);
+    setSelection({
+      minX: origin.x,
+      minY: origin.y,
+      maxX: origin.x + copiedSelection.width - 1,
+      maxY: origin.y + copiedSelection.height - 1,
+    });
+    setActivity(`Pasted ${changes.length} pixel${changes.length === 1 ? "" : "s"} from a ${copiedSelection.width} by ${copiedSelection.height} copy at (${origin.x}, ${origin.y}).`);
+  };
+
+  const moveSelectionBy = (dx: number, dy: number) => {
+    if (!selection) return;
+    if (
+      selection.minX + dx < CANVAS_MIN ||
+      selection.maxX + dx > CANVAS_MAX ||
+      selection.minY + dy < CANVAS_MIN ||
+      selection.maxY + dy > CANVAS_MAX
+    ) {
+      setActivity("The selection is already at the canvas edge.");
+      return;
+    }
+    const captured = captureSelection();
+    if (!captured) return;
+    const nextSelection = {
+      minX: selection.minX + dx,
+      minY: selection.minY + dy,
+      maxX: selection.maxX + dx,
+      maxY: selection.maxY + dy,
+    };
+    const changes = captured.pixels.map(({ x, y, color }) => ({
+      x: nextSelection.minX + x,
+      y: nextSelection.minY + y,
+      color,
+    }));
+    if (changes.length > 0) {
+      dispatch({
+        type: "move",
+        from: selection,
+        changes,
+        selectionBefore: selection,
+        selectionAfter: nextSelection,
+      });
+    }
+    setSelection(nextSelection);
+    setActivity(`Moved the selection by ${dx !== 0 ? `${Math.abs(dx)} pixel ${dx < 0 ? "left" : "right"}` : `${Math.abs(dy)} pixel ${dy < 0 ? "up" : "down"}`}.`);
   };
 
   const transformSelection = (
@@ -2036,13 +2057,20 @@ function App() {
       const mapped = mapPixel(x, y, width, height);
       return { x: selection.minX + mapped.x, y: selection.minY + mapped.y, color };
     });
-    dispatch({ type: "move", from: selection, changes });
-    setSelection({
+    const nextSelection = {
       minX: selection.minX,
       minY: selection.minY,
       maxX: selection.minX + nextWidth - 1,
       maxY: selection.minY + nextHeight - 1,
+    };
+    dispatch({
+      type: "move",
+      from: selection,
+      changes,
+      selectionBefore: selection,
+      selectionAfter: nextSelection,
     });
+    setSelection(nextSelection);
     setActivity(`${label} the selection.`);
   };
 
@@ -2209,9 +2237,14 @@ function App() {
       const target = event.target as HTMLElement | null;
       if (target?.matches("input, textarea, select") || target?.isContentEditable) return;
       const file = findImageFile(event.clipboardData?.files, event.clipboardData?.items);
-      if (!file) return;
+      if (file) {
+        event.preventDefault();
+        void readImportFile(file);
+        return;
+      }
+      if (showExport || showImport || !copiedSelection) return;
       event.preventDefault();
-      void readImportFile(file);
+      pasteSelection();
     };
     const blockFileDrop = (event: DragEvent) => {
       if (carriesFiles(event.dataTransfer)) event.preventDefault();
@@ -2224,7 +2257,7 @@ function App() {
       window.removeEventListener("dragover", blockFileDrop);
       window.removeEventListener("drop", blockFileDrop);
     };
-  }, []);
+  }, [copiedSelection, showExport, showImport]);
 
   const updateImportWidth = (value: number) => {
     if (!importDetectedSize) return;
@@ -2301,15 +2334,104 @@ function App() {
 
   const undoPixels = () => {
     if (history.undoDepth === 0) return;
+    const patch = store.undoStack.at(-1);
     dispatch({ type: "undo" });
+    if (patch?.selectionBefore) setSelection(patch.selectionBefore);
     setActivity("Undid the last pixel edit.");
   };
 
   const redoPixels = () => {
     if (history.redoDepth === 0) return;
+    const patch = store.redoStack.at(-1);
     dispatch({ type: "redo" });
+    if (patch?.selectionAfter) setSelection(patch.selectionAfter);
     setActivity("Redid the last pixel edit.");
   };
+
+  useEffect(() => {
+    const panelOpen = showExport || showImport;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isTyping = target?.matches("input, textarea, select") || target?.isContentEditable;
+      const modifierPressed = event.metaKey || event.ctrlKey;
+      const key = event.key.toLowerCase();
+      const wantsUndo = modifierPressed && key === "z" && !event.shiftKey;
+      const wantsRedo = modifierPressed && ((key === "z" && event.shiftKey) || key === "y");
+
+      if (!panelOpen && !isTyping && wantsUndo && history.undoDepth > 0) {
+        event.preventDefault();
+        undoPixels();
+        return;
+      }
+      if (!panelOpen && !isTyping && wantsRedo && history.redoDepth > 0) {
+        event.preventDefault();
+        redoPixels();
+        return;
+      }
+      if (!panelOpen && !isTyping && modifierPressed && !event.shiftKey && !event.altKey && !event.repeat) {
+        if (key === "c" && selection) {
+          event.preventDefault();
+          copySelection();
+          return;
+        }
+        if (key === "x" && selection) {
+          event.preventDefault();
+          cutSelection();
+          return;
+        }
+      }
+      const arrowMoves: Record<string, ScreenPoint | undefined> = {
+        arrowleft: { x: -1, y: 0 },
+        arrowright: { x: 1, y: 0 },
+        arrowup: { x: 0, y: -1 },
+        arrowdown: { x: 0, y: 1 },
+      };
+      const arrowMove = !modifierPressed && !event.altKey ? arrowMoves[key] : undefined;
+      if (!panelOpen && !isTyping && arrowMove) {
+        event.preventDefault();
+        if (selection) {
+          moveSelectionBy(arrowMove.x, arrowMove.y);
+        } else {
+          setViewport((current) =>
+            clampViewport({
+              ...current,
+              x: current.x + (arrowMove.x * 40) / current.zoom,
+              y: current.y + (arrowMove.y * 40) / current.zoom,
+            }, canvasSize),
+          );
+          setActivity(`Panned ${key.slice(5)}.`);
+        }
+        return;
+      }
+      const shortcutTool = !modifierPressed && !event.altKey ? TOOL_SHORTCUTS[key] : undefined;
+      if (!panelOpen && !isTyping && !event.repeat && shortcutTool) {
+        event.preventDefault();
+        if (shortcutTool === "picker" && tool !== "picker") {
+          toolBeforePickerRef.current = isColorTool(tool) ? tool : "paint";
+        }
+        setTool(shortcutTool);
+        setActivity(`${shortcutTool === "paint" ? "Draw" : shortcutTool[0].toUpperCase() + shortcutTool.slice(1)} tool selected.`);
+        return;
+      }
+      if (event.code !== "Space" || event.repeat || isTyping || target?.matches("button")) return;
+      spacePressedRef.current = true;
+      event.preventDefault();
+    };
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.code === "Space") spacePressedRef.current = false;
+    };
+    const handleBlur = () => {
+      spacePressedRef.current = false;
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", handleBlur);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", handleBlur);
+    };
+  }, [canvasSize, copiedSelection, history.redoDepth, history.undoDepth, selection, showExport, showImport, tool]);
 
   return (
     <main className="app-shell">
@@ -2478,7 +2600,8 @@ function App() {
                 disabled={history.undoDepth === 0}
                 onClick={undoPixels}
                 aria-label="Undo last pixel edit"
-                title="Undo"
+                aria-keyshortcuts="Control+Z Meta+Z"
+                title="Undo (Ctrl/Cmd+Z)"
               >
                 <svg viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M6 4 2.5 7.5 6 11M3 7.5h5a5 5 0 0 1 5 5" />
@@ -2489,7 +2612,8 @@ function App() {
                 disabled={history.redoDepth === 0}
                 onClick={redoPixels}
                 aria-label="Redo last pixel edit"
-                title="Redo"
+                aria-keyshortcuts="Control+Y Meta+Shift+Z"
+                title="Redo (Ctrl+Y or Cmd+Shift+Z)"
               >
                 <svg viewBox="0 0 16 16" aria-hidden="true">
                   <path d="m10 4 3.5 3.5L10 11m3-3.5H8a5 5 0 0 0-5 5" />
@@ -2497,6 +2621,26 @@ function App() {
               </button>
             </div>
           </fieldset>
+
+          {selection ? (
+            <fieldset className="selection-nudge-control">
+              <legend>Nudge selection</legend>
+              <div className="selection-nudge-buttons">
+                <button type="button" onClick={() => moveSelectionBy(-1, 0)} aria-label="Move selection one pixel left" title="Move left">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m7 3-5 5 5 5M2 8h12" /></svg>
+                </button>
+                <button type="button" onClick={() => moveSelectionBy(0, -1)} aria-label="Move selection one pixel up" title="Move up">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 7 5-5 5 5M8 2v12" /></svg>
+                </button>
+                <button type="button" onClick={() => moveSelectionBy(0, 1)} aria-label="Move selection one pixel down" title="Move down">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 9 5 5 5-5M8 14V2" /></svg>
+                </button>
+                <button type="button" onClick={() => moveSelectionBy(1, 0)} aria-label="Move selection one pixel right" title="Move right">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m9 3 5 5-5 5M14 8H2" /></svg>
+                </button>
+              </div>
+            </fieldset>
+          ) : null}
 
           <fieldset className="zoom-control">
             <legend>Zoom</legend>
@@ -2620,14 +2764,21 @@ function App() {
                   type="button"
                   onClick={copySelection}
                   aria-label="Copy selected pixels"
-                  title="Copy selected pixels"
+                  aria-keyshortcuts="Control+C Meta+C"
+                  title="Copy selected pixels (Ctrl/Cmd+C)"
                 >
                   <svg viewBox="0 0 16 16" aria-hidden="true">
                     <rect x="5.5" y="5.5" width="7" height="7" />
                     <path d="M3.5 10.5h-1v-8h8v1" />
                   </svg>
                 </button>
-                <button type="button" onClick={cutSelection} aria-label="Cut selected pixels" title="Cut selected pixels">
+                <button
+                  type="button"
+                  onClick={cutSelection}
+                  aria-label="Cut selected pixels"
+                  aria-keyshortcuts="Control+X Meta+X"
+                  title="Cut selected pixels (Ctrl/Cmd+X)"
+                >
                   <svg viewBox="0 0 16 16" aria-hidden="true">
                     <circle cx="4" cy="4" r="2" />
                     <circle cx="4" cy="12" r="2" />
@@ -2635,7 +2786,13 @@ function App() {
                   </svg>
                 </button>
                 {copiedSelection ? (
-                  <button type="button" onClick={pasteSelection} aria-label="Paste copied pixels" title="Paste copied pixels">
+                  <button
+                    type="button"
+                    onClick={pasteSelection}
+                    aria-label="Paste copied pixels"
+                    aria-keyshortcuts="Control+V Meta+V"
+                    title="Paste copied pixels (Ctrl/Cmd+V)"
+                  >
                     <svg viewBox="0 0 16 16" aria-hidden="true">
                       <path d="M5 4V2.5h6V4m-7 0h8v9H4zM8 6v5m-2-2 2 2 2-2" />
                     </svg>
