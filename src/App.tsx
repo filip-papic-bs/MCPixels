@@ -2169,6 +2169,13 @@ function App() {
       : exportOutputSize.width > MAX_EXPORT_DIMENSION || exportOutputSize.height > MAX_EXPORT_DIMENSION
         ? `Output must be at most ${MAX_EXPORT_DIMENSION}px per side.`
         : "";
+  const exportingFullCanvas = Boolean(
+    selection &&
+      selection.minX <= CANVAS_MIN &&
+      selection.minY <= CANVAS_MIN &&
+      selection.maxX >= CANVAS_MAX &&
+      selection.maxY >= CANVAS_MAX,
+  );
   const importDetectedSize = importSource ? { width: importSource.columns, height: importSource.rows } : null;
   const importFoundGrid = Boolean(
     importSource && (importSource.columns < importSource.width || importSource.rows < importSource.height),
@@ -2333,15 +2340,33 @@ function App() {
       "Rotated",
     );
 
-  const openExportPanel = () => {
-    if (!selectionSize) return;
-    const scale = Math.min(DEFAULT_EXPORT_SCALE, maxExportScale);
+  const openExportPanel = (bounds?: SelectionBounds) => {
+    const area = bounds ?? selection;
+    if (!area) return;
+    const width = area.maxX - area.minX + 1;
+    const height = area.maxY - area.minY + 1;
+    const scale = Math.max(
+      1,
+      Math.min(
+        DEFAULT_EXPORT_SCALE,
+        MAX_EXPORT_SCALE,
+        Math.floor(MAX_EXPORT_DIMENSION / width),
+        Math.floor(MAX_EXPORT_DIMENSION / height),
+      ),
+    );
+    if (bounds) setSelection(bounds);
     setExportMode("scale");
     setExportScale(scale);
-    setExportDimensions({ width: selectionSize.width * scale, height: selectionSize.height * scale });
+    setExportDimensions({ width: width * scale, height: height * scale });
     setLockExportRatio(true);
     setExportError("");
     setShowExport(true);
+  };
+
+  const exportFullCanvas = () => {
+    setDockPanel(null);
+    setCanvasMenu(null);
+    openExportPanel({ minX: CANVAS_MIN, minY: CANVAS_MIN, maxX: CANVAS_MAX, maxY: CANVAS_MAX });
   };
 
   const closeExportPanel = () => {
@@ -2403,14 +2428,22 @@ function App() {
       if (!sourceContext) throw new Error("Could not create the export canvas");
 
       const area = clampSelectionToCanvas(selection);
+      const image = sourceContext.createImageData(selectionSize.width, selectionSize.height);
+      const painted = image.data;
       for (let y = area.minY; y <= area.maxY; y += 1) {
+        const rowStart = (y - CANVAS_MIN) * CANVAS_SIZE - CANVAS_MIN;
+        const target = (y - selection.minY) * selectionSize.width - selection.minX;
         for (let x = area.minX; x <= area.maxX; x += 1) {
-          const cell = store.cells[cellIndex(x, y)];
+          const cell = store.cells[rowStart + x];
           if (cell === EMPTY_CELL) continue;
-          sourceContext.fillStyle = colorFromCell(cell);
-          sourceContext.fillRect(x - selection.minX, y - selection.minY, 1, 1);
+          const offset = (target + x) * 4;
+          painted[offset] = (cell >>> 16) & 255;
+          painted[offset + 1] = (cell >>> 8) & 255;
+          painted[offset + 2] = cell & 255;
+          painted[offset + 3] = 255;
         }
       }
+      sourceContext.putImageData(image, 0, 0);
 
       const outputCanvas = document.createElement("canvas");
       outputCanvas.width = exportOutputSize.width;
@@ -2798,9 +2831,9 @@ function App() {
                 </button>
                 <button
                   type="button"
-                  disabled
-                  aria-label="Export canvas, coming soon"
-                  title="Export canvas (coming soon)"
+                  aria-label="Export canvas"
+                  title="Export canvas"
+                  onClick={exportFullCanvas}
                 >
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m-4 4 4-4 4 4M5 18h14" /></svg>
                 </button>
@@ -3034,7 +3067,7 @@ function App() {
                 <span className="selection-action-separator" aria-hidden="true" />
                 <button
                   type="button"
-                  onClick={openExportPanel}
+                  onClick={() => openExportPanel()}
                   aria-label="Export selection"
                   title="Export selection"
                 >
@@ -3115,7 +3148,7 @@ function App() {
                 <header>
                   <div>
                     <span>PNG export</span>
-                    <h2 id="export-title">Export selection</h2>
+                    <h2 id="export-title">{exportingFullCanvas ? "Export canvas" : "Export selection"}</h2>
                   </div>
                   <button type="button" onClick={closeExportPanel} aria-label="Cancel export">×</button>
                 </header>
@@ -3193,7 +3226,7 @@ function App() {
                 )}
 
                 <div className="export-summary">
-                  <span>Selection {selectionSize.width} × {selectionSize.height}px</span>
+                  <span>{exportingFullCanvas ? "Canvas" : "Selection"} {selectionSize.width} × {selectionSize.height}px</span>
                   <strong>{exportOutputSize.width} × {exportOutputSize.height}px</strong>
                 </div>
                 {exportSizeError || exportError ? <p className="export-error">{exportSizeError || exportError}</p> : null}
