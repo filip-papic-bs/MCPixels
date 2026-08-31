@@ -36,15 +36,11 @@ import type {
 import { createPaintCaches } from "../render/painter.ts";
 import type { PaintCaches } from "../render/painter.ts";
 import { useNotices } from "./useNotices.ts";
-import type { CanvasMenu, DockPanel, Notice, NoticeMeta } from "./constants.tsx";
+import type { CanvasMenu, DockPanel, Notice, NoticeLogEntry, NoticeMeta } from "./constants.tsx";
 import type { EditorActions } from "./actions.ts";
 
 export type WebMcpStatus = "checking" | "ready" | "working" | "unavailable" | "error";
 
-/**
- * Every value the UI renders from. A new object each render, so anything that
- * reads it re-renders — which is what you want for values that are drawn.
- */
 export type EditorSnapshot = {
   history: HistoryState;
   selectedColor: string;
@@ -86,25 +82,18 @@ export type EditorSnapshot = {
   autoFollow: boolean;
   activity: string;
   notices: Notice[];
+  noticeLog: NoticeLogEntry[];
 };
 
 type Setter<T> = (next: T | ((current: T) => T)) => void;
 
-/**
- * Functions and refs only, with an identity that never changes. Reading it
- * never re-renders you, so it is safe to consume from a memoized component and
- * from mount-once effects that must still see live state.
- */
 export type EditorRuntime = {
   store: PixelStore;
   cells: Uint32Array;
   dispatch: (action: PixelAction) => EditOutcome;
   latest: RefObject<EditorSnapshot>;
-  /** Filled by the editor each render. Call from handlers, never read in render. */
   actions: RefObject<EditorActions>;
-  /** Set by useAutoFollow; every agent write reports the box it touched. */
   agentEdit: RefObject<(bounds: SelectionBounds | null) => void>;
-  /** Set by useViewportAnimation; stops an in-flight glide. */
   interruptView: RefObject<() => void>;
 
   canvasRef: RefObject<HTMLCanvasElement | null>;
@@ -166,6 +155,7 @@ export type EditorRuntime = {
   setAutoFollow: Setter<boolean>;
   setActivity: (text: string) => void;
   notify: (text: string, meta?: NoticeMeta) => void;
+  clearNoticeLog: () => void;
 };
 
 const SnapshotContext = createContext<EditorSnapshot | null>(null);
@@ -191,7 +181,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   const cells = store.cells;
 
   const [history, setHistory] = useState<HistoryState>({ version: 0, undoDepth: 0, redoDepth: 0 });
-  const { activity, setActivity, notices, notify } = useNotices();
+  const { activity, setActivity, notices, noticeLog, notify, clearNoticeLog } = useNotices();
 
   const [selectedColor, setSelectedColor] = useState(initialState.selectedColor);
   const [customColors, setCustomColors] = useState(initialState.customColors);
@@ -303,6 +293,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     autoFollow,
     activity,
     notices,
+    noticeLog,
   };
 
   // Written during render, the same idiom the editor already used for
@@ -394,13 +385,13 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       setAutoFollow,
       setActivity,
       notify,
+      clearNoticeLog,
     };
   }
 
-  // `setActivity` and `notify` come from useNotices and are recreated each
-  // render, so refresh just those two rather than rebuilding the runtime.
   runtimeRef.current.setActivity = setActivity;
   runtimeRef.current.notify = notify;
+  runtimeRef.current.clearNoticeLog = clearNoticeLog;
 
   useEffect(() => {
     const save = () => {

@@ -137,10 +137,9 @@ button {
 }
 
 .agent-status {
+  position: relative;
   display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 7px 10px;
+  align-items: stretch;
   border: 1px solid rgba(52, 55, 51, 0.28);
   color: #545751;
   font-size: 0.61rem;
@@ -148,41 +147,83 @@ button {
   text-transform: uppercase;
   background: rgba(250, 250, 247, 0.88);
   backdrop-filter: blur(8px);
+  transition: border-color 140ms ease;
 }
 
-.agent-status span {
+.agent-status:hover,
+.agent-status:focus-within {
+  border-color: rgba(239, 89, 56, 0.7);
+}
+
+.agent-status-main,
+.agent-status-toggle {
+  display: flex;
+  align-items: center;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  background: none;
+  cursor: pointer;
+  transition:
+    color 140ms ease,
+    background-color 140ms ease;
+}
+
+.agent-status-main {
+  gap: 9px;
+  padding: 7px 10px;
+}
+
+.agent-status-toggle {
+  padding: 0 6px;
+  border-left: 1px solid rgba(52, 55, 51, 0.2);
+}
+
+.agent-status-main:hover,
+.agent-status-main:focus-visible,
+.agent-status-toggle:hover,
+.agent-status-toggle:focus-visible {
+  color: #30322f;
+  background: rgba(239, 89, 56, 0.09);
+}
+
+.agent-status-toggle svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: square;
+  stroke-linejoin: miter;
+  stroke-width: 1.4;
+  transition: transform 140ms ease;
+}
+
+.agent-status-toggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.agent-status-dot {
   width: 7px;
   height: 7px;
+  flex: 0 0 7px;
   border: 1px solid #555851;
   border-radius: 50%;
   background: #f0b932;
 }
 
-.agent-status--ready span {
+.agent-status--ready .agent-status-dot {
   background: #4fb873;
 }
 
-.agent-status--unavailable span,
-.agent-status--error span {
+.agent-status--unavailable .agent-status-dot,
+.agent-status--error .agent-status-dot {
   background: #ef5938;
 }
 
-.agent-status--button {
-  font-family: inherit;
-  cursor: pointer;
-  transition:
-    border-color 140ms ease,
-    color 140ms ease;
-}
-
-.agent-status--button:hover,
-.agent-status--button:focus-visible {
-  border-color: rgba(239, 89, 56, 0.7);
-  color: #30322f;
-}
-
 /* Pulses while an agent tool is running, so co-editing is visible on screen. */
-.agent-status--working span {
+.agent-status--working .agent-status-dot {
   animation: agent-pulse 900ms ease-in-out infinite;
 }
 
@@ -755,6 +796,14 @@ button {
   border-radius: 9px;
 }
 
+.agent-status-main {
+  border-radius: 8px 0 0 8px;
+}
+
+.agent-status-toggle {
+  border-radius: 0 8px 8px 0;
+}
+
 .bottom-controls {
   position: absolute;
   z-index: 5;
@@ -1098,6 +1147,115 @@ button {
   }
 }
 
+.agent-log {
+  position: absolute;
+  z-index: 6;
+  top: calc(100% + 6px);
+  right: 0;
+  display: flex;
+  width: min(320px, 78vw);
+  max-height: min(340px, 52vh);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(48, 50, 47, 0.24);
+  border-radius: 11px;
+  color: #353733;
+  font-size: 0.68rem;
+  letter-spacing: normal;
+  text-align: left;
+  text-transform: none;
+  background: rgba(250, 250, 247, 0.98);
+  box-shadow: 0 8px 28px rgba(30, 32, 29, 0.16);
+  backdrop-filter: blur(14px);
+}
+
+.masthead:has(.agent-log) .notice-stack {
+  visibility: hidden;
+}
+
+.agent-log header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 11px;
+  border-bottom: 1px solid rgba(48, 50, 47, 0.12);
+  color: #72756e;
+  font-size: 0.6rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.agent-log-clear {
+  padding: 0;
+  border: 0;
+  color: #b44127;
+  font: inherit;
+  background: none;
+  cursor: pointer;
+}
+
+.agent-log-clear:hover,
+.agent-log-clear:focus-visible {
+  text-decoration: underline;
+}
+
+.agent-log-empty {
+  margin: 0;
+  padding: 14px 11px;
+  color: #72756e;
+  line-height: 1.35;
+}
+
+.agent-log-list {
+  margin: 0;
+  padding: 5px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.agent-log-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 7px;
+  border-left: 2px solid transparent;
+  line-height: 1.3;
+}
+
+.agent-log-item:has(.agent-log-jump) {
+  padding: 0;
+}
+
+.agent-log-jump {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 7px;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  background: none;
+  cursor: pointer;
+}
+
+.agent-log-jump:hover,
+.agent-log-jump:focus-visible {
+  background: rgba(239, 89, 56, 0.09);
+}
+
+.agent-log-time {
+  flex: 0 0 auto;
+  color: #8a8d85;
+  font-size: 0.6rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-log-text {
+  flex: 1 1 auto;
+}
+
 .brush-dock-button {
   position: relative;
 }
@@ -1118,18 +1276,6 @@ button {
 .brush-dock-button:hover::after,
 .brush-dock-button.dock-button--active::after {
   opacity: 0.8;
-}
-
-.brush-dock-button em {
-  position: absolute;
-  top: 5px;
-  right: 6px;
-  font-size: 0.5rem;
-  font-style: normal;
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-  opacity: 0.75;
-  pointer-events: none;
 }
 
 .popover-sizes {
@@ -1300,7 +1446,6 @@ button {
     font-size: 0.9rem;
   }
 
-  .agent-status,
   .save-warning {
     padding: 6px 7px;
     font-size: 0.46rem;
@@ -1309,10 +1454,25 @@ button {
   .agent-status {
     width: auto;
     height: auto;
-    justify-content: flex-start;
+    font-size: 0.46rem;
+  }
+
+  .agent-status-main {
     gap: 6px;
     padding: 6px 7px;
-    font-size: 0.46rem;
+  }
+
+  .agent-status-toggle {
+    padding: 0 5px;
+  }
+
+  .agent-status-toggle svg {
+    width: 11px;
+    height: 11px;
+  }
+
+  .agent-log {
+    font-size: 0.66rem;
   }
 
   .bottom-controls {

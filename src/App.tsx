@@ -63,6 +63,7 @@ function Editor() {
     autoFollow,
     activity,
     notices,
+    noticeLog,
   } = useEditorState();
   const {
     store,
@@ -356,8 +357,10 @@ function Editor() {
         webMcpStatus={webMcpStatus}
         toolCount={toolCount}
         notices={notices}
+        noticeLog={noticeLog}
         onExplainAgents={() => setShowAgentHelp(true)}
         onJumpTo={frameRegionOnScreen}
+        onClearNoticeLog={runtime.clearNoticeLog}
       />
 
       <section className="editor" aria-label="MCPixels editor">

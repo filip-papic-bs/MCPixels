@@ -237,7 +237,6 @@ export const BottomDock = memo(function BottomDock({
           <svg viewBox="0 0 20 20" aria-hidden="true">
             <path d="m4 14 1.2-4.2L13 2l5 5-7.8 7.8L6 16zM12 3l5 5M4 14l2 2" />
           </svg>
-          {brushSize > 1 ? <em>{brushSize}</em> : null}
         </button>
         <button
           className={`${tool === "erase" ? "dock-button dock-button--active" : "dock-button"} brush-dock-button`}
@@ -254,7 +253,6 @@ export const BottomDock = memo(function BottomDock({
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="m3.5 14 9.5-9.5 7 7-7.5 7.5H8.5zM8 9.5l7 7M12.5 19H21" />
           </svg>
-          {brushSize > 1 ? <em>{brushSize}</em> : null}
         </button>
         <button
           className={tool === "fill" ? "dock-button dock-button--active" : "dock-button"}

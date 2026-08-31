@@ -1,6 +1,6 @@
 import { memo } from "react";
 import type { SelectionBounds } from "../pixels.ts";
-import type { Notice } from "../editor/constants.tsx";
+import type { Notice, NoticeLogEntry } from "../editor/constants.tsx";
 import type { WebMcpStatus } from "../editor/EditorProvider.tsx";
 import { AgentStatus } from "./AgentStatus.tsx";
 import { NoticeStack } from "./NoticeStack.tsx";
@@ -10,15 +10,19 @@ export const Masthead = memo(function Masthead({
   webMcpStatus,
   toolCount,
   notices,
+  noticeLog,
   onExplainAgents,
   onJumpTo,
+  onClearNoticeLog,
 }: {
   storageError: string;
   webMcpStatus: WebMcpStatus;
   toolCount: number;
   notices: Notice[];
+  noticeLog: NoticeLogEntry[];
   onExplainAgents: () => void;
   onJumpTo: (bounds: SelectionBounds) => void;
+  onClearNoticeLog: () => void;
 }) {
   return (
     <header className="masthead">
@@ -35,7 +39,14 @@ export const Masthead = memo(function Masthead({
             Not saved
           </div>
         ) : null}
-        <AgentStatus status={webMcpStatus} toolCount={toolCount} onExplain={onExplainAgents} />
+        <AgentStatus
+          status={webMcpStatus}
+          toolCount={toolCount}
+          noticeLog={noticeLog}
+          onExplain={onExplainAgents}
+          onJumpTo={onJumpTo}
+          onClearLog={onClearNoticeLog}
+        />
       </div>
       <NoticeStack notices={notices} onJumpTo={onJumpTo} />
     </header>

@@ -85,6 +85,16 @@ export type Notice = {
   bounds?: SelectionBounds;
 };
 
+export type NoticeLogEntry = {
+  id: number;
+  text: string;
+  count: number;
+  at: number;
+  kind?: NoticeKind;
+  bounds?: SelectionBounds;
+};
+
 export const NOTICE_HOLD = 4_200;
 export const NOTICE_FADE = 320;
+export const NOTICE_LOG_LIMIT = 80;
 export const HOLD_TO_OPEN = 420;
