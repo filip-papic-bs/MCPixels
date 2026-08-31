@@ -1,0 +1,116 @@
+---
+name: drawing-on-mcpixels
+description: Draw, read back and rearrange pixel art on mcpixels.app through its six in-page WebMCP tools, using the rows-and-palette wire format instead of per-pixel coordinates.
+license: AGPL-3.0-or-later
+---
+
+# Drawing on MCPixels
+
+[mcpixels.app](https://mcpixels.app/) is a 1024×1024 pixel canvas that a person and
+an agent edit at the same time, in the same browser tab. The tools are **WebMCP site
+tools**: the page registers them itself with `document.modelContext.registerTool` when
+it loads. There is no MCP endpoint to connect to and no account to make — open the page
+in a WebMCP-capable browser and six tools appear.
+
+Coordinates are centred: `x` and `y` both run **-512..511**, with `y` increasing
+downward. `(0, 0)` is the middle of the canvas.
+
+## The six tools
+
+| tool | what it does |
+| --- | --- |
+| `draw_pixel_art` | The only tool you send pixel data to: `rows` of palette characters, an `ops` command string, or both, plus optional `mirror`. |
+| `read_canvas` | Reads a region back in exactly the format `draw_pixel_art` accepts. |
+| `selection` | Moves art that is already there — duplicate, move, erase, flip, rotate, copy/cut/paste, set/dismiss the marquee. No pixel data travels through it. |
+| `edit` | `undo`, `redo` (up to 20 steps), `clear-canvas`. One timeline, shared with the person. |
+| `view` | Frames a region on screen. Draws nothing. |
+| `export_pixel_art` | Saves a region as a PNG to the person's downloads. |
+
+## Send pictures, not coordinates
+
+A 32×32 sprite as `[{x, y, color}, …]` costs roughly 22,500 tokens. The same sprite as
+rows of palette characters costs about 400 — and you can see what you are writing:
+
+```js
+draw_pixel_art({
+  origin: [-4, -3],
+  palette: { k: "#161616", r: "#ff5c35", w: "#f5f1e8" },
+  rows: ["..kkkk..", ".krrrrk.", "kr.ww.rk", "krrrrrrk", ".kkkkkk."],
+})
+```
+
+- `origin` is where the **top-left cell** of `rows` lands.
+- `palette` maps one character to one hex colour, up to 64 entries.
+- `.` leaves the cell underneath alone; `-` erases it. Stamping never scrubs the art
+  around your shape, so build up in layers rather than padding a sprite with background.
+- Up to 256 rows of 256 characters per call. Anything off-canvas is clipped, not an error.
+
+## Large geometry goes through `ops`
+
+`ops` is a `;`-separated command string in absolute coordinates:
+
+```
+c #2d7ff9; rect -20 -20 20 20 f; bucket 0 0
+```
+
+- `c COLOR` — set the pen. `COLOR` is a palette key, a hex value, or `-` to erase.
+- `px x y …` — individual cells.
+- `line x0 y0 x1 y1`
+- `rect x0 y0 x1 y1 [f]` / `ellipse x0 y0 x1 y1 [f]` — `f` fills.
+- `bucket x y` — flood fill.
+- `recolor from to x0 y0 x1 y1` — swap one colour for another inside a rectangle.
+
+Up to 128 ops, 4000 characters. `rows` run first and later writes win, so one call can
+stamp a sprite and then rule a line across it.
+
+`mirror` (`"left-right"`, `"top-bottom"`, `"both"`) repeats everything the call draws
+across the canvas centre — draw half a symmetrical thing and let the tool write the
+other half.
+
+**One call is one undo step.** A call whose input is invalid changes nothing at all.
+
+## Read before you redraw
+
+`read_canvas` returns `{origin, palette, rows}` in the same shape `draw_pixel_art` takes,
+so read → edit the rows → draw them back is a closed loop with no reformatting. Two
+things to watch:
+
+- In a read, `.` means **empty**. Drawn back, `.` means **keep what is there**. To clear
+  a cell you have to write `-`.
+- A read is capped at roughly 2,600 tokens whatever is on the canvas: a named region up
+  to 64×64 comes back at native resolution, anything larger is block-downscaled and
+  `exact` comes back `false`. If `exact` is false, read a smaller region before relying
+  on the rows.
+
+Omit `region` for an overview of everything painted. The reply also carries `art` (the
+bounds of everything painted), `selection`, and the person's current `view`.
+
+## Rearrange with `selection`, not by redrawing
+
+`selection` costs no pixel data at all. `op` is one of `set`, `dismiss`, `erase`,
+`duplicate`, `move`, `copy`, `cut`, `paste`, `flip-left-right`, `flip-top-bottom`,
+`rotate` (90° clockwise). `to` is the **absolute** top-left corner of the target, not an
+offset, and `duplicate` takes `times` (up to 64) to lay down a whole row of copies in one
+call, each repeating the offset of the first.
+
+`region` defaults to whatever the person has selected, so omit it when they said "this"
+and pass it explicitly when they did not.
+
+## Working alongside the person
+
+- The undo timeline is shared. `edit({op: "undo"})` can undo *their* stroke — only reach
+  for it when they asked.
+- Your actions show up in a notice feed under the header, and the view eases over to
+  frame edits you make off screen, so you do not need `view` to make your work visible.
+  Use `view` only for navigation the person asked for.
+- `view` refuses while the person is mid-stroke; wait a moment and try again.
+- `draw_pixel_art` may return a single `hint` when the same result had a much cheaper
+  form — a mirrored half, one filled rect. It is advice about your *next* call; the call
+  you made still did exactly what you asked.
+- `export_pixel_art` writes a file into the person's downloads. Ask first.
+
+## Where the rest lives
+
+- Agent guide: <https://mcpixels.app/llms.txt>
+- Server card: <https://mcpixels.app/.well-known/mcp/server-card.json>
+- Authentication (there is none): <https://mcpixels.app/auth.md>

@@ -1,0 +1,32 @@
+# MCPixels
+
+> A 1024×1024 pixel-art canvas that a person and an AI agent edit together, live, in the
+> same browser tab. The editor hands an agent six WebMCP site tools — registered by the
+> page itself via `document.modelContext.registerTool` — so the agent is a participant
+> rather than a pixel pipe. No backend, no account, no API keys.
+
+Coordinates are centred: x and y run -512..511, y downward. The tools are `draw_pixel_art`
+(the only one you send pixel data to), `read_canvas`, `selection`, `edit`, `view` and
+`export_pixel_art`. Pixel data travels as rows of one-character palette entries, not as
+per-pixel coordinates — a 32×32 sprite costs about 400 tokens that way instead of 22,500.
+
+There is nothing to call over HTTP: the tools only exist inside a loaded page, in a
+browser that supports WebMCP (the ChatGPT desktop app's browser, or Chrome 146+ with
+`chrome://flags/#enable-webmcp-testing`).
+
+## Docs
+
+- [Homepage as markdown](https://mcpixels.app/index.md): what the site is, in prose.
+- [Skill: drawing on MCPixels](https://mcpixels.app/.well-known/agent-skills/drawing-on-mcpixels/SKILL.md): the wire format, the ops string, mirroring, reading before redrawing, and working alongside the person.
+- [auth.md](https://mcpixels.app/auth.md): there is no authentication; here is why.
+
+## Machine-readable discovery
+
+- [MCP server card](https://mcpixels.app/.well-known/mcp/server-card.json): SEP-1649 card for the in-page WebMCP server.
+- [API catalog](https://mcpixels.app/.well-known/api-catalog): RFC 9727 linkset.
+- [ARD capability manifest](https://mcpixels.app/.well-known/ai-catalog.json): agentic resource discovery entries.
+- [Agent skills index](https://mcpixels.app/.well-known/agent-skills/index.json): skills with SHA-256 digests.
+
+## Source
+
+- [github.com/filip-papic-bs/MCPixels](https://github.com/filip-papic-bs/MCPixels): the whole editor, AGPL-3.0-or-later. Built for the [WebMCP Challenge](https://webmcp.devpost.com/).

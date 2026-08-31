@@ -1,4 +1,11 @@
+# Content-Signal is a preference expressed under contentsignals.org.
+# search: showing this page in search results.
+# ai-input: reading the page to answer a person's question, or to drive the
+#   WebMCP tools on it — which is what this site exists for.
+# ai-train: keeping a copy to train or fine-tune a generative model.
 User-agent: *
 Allow: /
+Content-Signal: search=yes, ai-input=yes, ai-train=yes
 
 Sitemap: https://mcpixels.app/sitemap.xml
+Agentmap: https://mcpixels.app/.well-known/ai-catalog.json

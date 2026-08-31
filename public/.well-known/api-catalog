@@ -1,0 +1,50 @@
+{
+  "linkset": [
+    {
+      "anchor": "https://mcpixels.app/",
+      "service-desc": [
+        {
+          "href": "https://mcpixels.app/.well-known/mcp/server-card.json",
+          "type": "application/json",
+          "title": "MCPixels WebMCP server card — the six site tools, machine-readable"
+        }
+      ],
+      "service-doc": [
+        {
+          "href": "https://mcpixels.app/llms.txt",
+          "type": "text/plain",
+          "title": "How an agent draws on MCPixels"
+        },
+        {
+          "href": "https://mcpixels.app/index.md",
+          "type": "text/markdown",
+          "title": "MCPixels homepage as markdown"
+        }
+      ],
+      "service-meta": [
+        {
+          "href": "https://mcpixels.app/.well-known/ai-catalog.json",
+          "type": "application/json",
+          "title": "ARD capability manifest"
+        },
+        {
+          "href": "https://mcpixels.app/.well-known/agent-skills/index.json",
+          "type": "application/json",
+          "title": "Agent skills discovery index"
+        },
+        {
+          "href": "https://mcpixels.app/auth.md",
+          "type": "text/markdown",
+          "title": "Authentication: none required"
+        }
+      ],
+      "describedby": [
+        {
+          "href": "https://mcpixels.app/.well-known/agent-skills/drawing-on-mcpixels/SKILL.md",
+          "type": "text/markdown",
+          "title": "Skill: drawing on MCPixels"
+        }
+      ]
+    }
+  ]
+}

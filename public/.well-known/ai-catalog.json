@@ -1,0 +1,61 @@
+{
+  "specVersion": "1.0",
+  "host": {
+    "displayName": "MCPixels",
+    "identifier": "did:web:mcpixels.app",
+    "url": "https://mcpixels.app/",
+    "description": "A 1024x1024 pixel-art canvas that a person and an AI agent edit together, live, on the same page, through WebMCP site tools."
+  },
+  "entries": [
+    {
+      "identifier": "urn:air:mcpixels.app:server:canvas",
+      "displayName": "MCPixels pixel canvas (WebMCP)",
+      "description": "Six in-page WebMCP tools for drawing, reading back, rearranging, undoing, framing and exporting pixel art on a shared 1024x1024 canvas. Registered by the page itself; there is no remote MCP endpoint.",
+      "type": "application/mcp-server-card+json",
+      "url": "https://mcpixels.app/.well-known/mcp/server-card.json",
+      "representativeQueries": [
+        "draw a sprite on a shared pixel canvas",
+        "edit pixel art together with a person in the browser",
+        "what WebMCP tools does this page expose",
+        "make a 32x32 pixel mushroom and export it as a PNG"
+      ]
+    },
+    {
+      "identifier": "urn:air:mcpixels.app:skill:drawing-on-mcpixels",
+      "displayName": "Skill: drawing on MCPixels",
+      "description": "How to use the six MCPixels tools well — the rows-and-palette wire format, ops strings, mirroring, reading before redrawing, and the token budget behind those choices.",
+      "type": "text/markdown",
+      "url": "https://mcpixels.app/.well-known/agent-skills/drawing-on-mcpixels/SKILL.md",
+      "representativeQueries": [
+        "how do I draw pixel art with the MCPixels tools",
+        "what is the rows and palette format for draw_pixel_art",
+        "how do I move or duplicate art already on the canvas",
+        "how do I read the canvas back before editing it"
+      ]
+    },
+    {
+      "identifier": "urn:air:mcpixels.app:doc:llms-txt",
+      "displayName": "MCPixels agent guide",
+      "description": "Short orientation for agents arriving at mcpixels.app: what the site is, what the tools do, and where the rest of the discovery documents live.",
+      "type": "text/plain",
+      "url": "https://mcpixels.app/llms.txt",
+      "representativeQueries": [
+        "what is mcpixels.app",
+        "how do agents use this site",
+        "where is the documentation for this pixel editor"
+      ]
+    },
+    {
+      "identifier": "urn:air:mcpixels.app:doc:auth",
+      "displayName": "MCPixels authentication policy",
+      "description": "States that MCPixels needs no credentials, no registration and no tokens: the canvas is local to the browser tab and the tools run in the page.",
+      "type": "text/markdown",
+      "url": "https://mcpixels.app/auth.md",
+      "representativeQueries": [
+        "how does an agent authenticate with mcpixels",
+        "does mcpixels need an API key",
+        "is there an agent registration endpoint for mcpixels"
+      ]
+    }
+  ]
+}

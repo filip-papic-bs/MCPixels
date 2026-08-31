@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
+  "version": "0.2.0",
+  "publisher": {
+    "name": "MCPixels",
+    "url": "https://mcpixels.app/"
+  },
+  "skills": [
+    {
+      "name": "drawing-on-mcpixels",
+      "type": "skill-md",
+      "description": "Draw, read back and rearrange pixel art on mcpixels.app through its six in-page WebMCP tools, using the rows-and-palette wire format instead of per-pixel coordinates.",
+      "version": "0.1.0",
+      "license": "AGPL-3.0-or-later",
+      "url": "https://mcpixels.app/.well-known/agent-skills/drawing-on-mcpixels/SKILL.md",
+      "digest": "sha256:405c9409b62fc8a2f21dbf3243867df49ed415212f5ddee96c0610b39d2a2199",
+      "size": 5477
+    }
+  ]
+}

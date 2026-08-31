@@ -1,0 +1,43 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "app.mcpixels/canvas",
+  "title": "MCPixels",
+  "description": "A 1024x1024 pixel-art canvas a person and an agent edit together, live, in the same browser tab. The tools are WebMCP tools: the page registers them itself with document.modelContext.registerTool when it loads, so they are called through the browser's model context rather than over a remote MCP transport. There is no server endpoint to connect to and no backend — open https://mcpixels.app/ in a WebMCP-capable browser and the six tools appear.",
+  "websiteUrl": "https://mcpixels.app/",
+  "version": "0.1.0",
+  "serverInfo": {
+    "name": "app.mcpixels/canvas",
+    "title": "MCPixels",
+    "version": "0.1.0",
+    "websiteUrl": "https://mcpixels.app/"
+  },
+  "transport": {
+    "type": "webmcp",
+    "endpoint": "https://mcpixels.app/",
+    "description": "In-page WebMCP. Load the endpoint in a browser that exposes navigator.modelContext / document.modelContext; the page registers its tools on load. No HTTP or stdio MCP transport is served."
+  },
+  "remotes": [
+    {
+      "type": "webmcp",
+      "url": "https://mcpixels.app/"
+    }
+  ],
+  "capabilities": {
+    "tools": {
+      "listChanged": true
+    }
+  },
+  "documentation": "https://mcpixels.app/llms.txt",
+  "skills": "https://mcpixels.app/.well-known/agent-skills/index.json",
+  "_meta": {
+    "app.mcpixels/tools": [
+      "draw_pixel_art",
+      "read_canvas",
+      "selection",
+      "edit",
+      "view",
+      "export_pixel_art"
+    ],
+    "app.mcpixels/note": "Tool schemas are not listed here: SEP-1649 leaves primitives to runtime discovery, and in WebMCP that means reading them off the loaded page."
+  }
+}
