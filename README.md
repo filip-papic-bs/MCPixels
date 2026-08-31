@@ -121,3 +121,12 @@ npm run deploy
 ```
 
 Typechecks, builds, and uploads `dist` to the `mcpixels` Pages project on `main`.
+
+## License
+
+[GNU AGPL-3.0](LICENSE). Free to use, study, modify and share — but if you run a
+modified version as a network service, section 13 requires you to offer its
+source to the people using it.
+
+Material Symbols is Apache-2.0 by Google; the glyphs inlined in
+`src/components/icons.tsx` keep that license.
