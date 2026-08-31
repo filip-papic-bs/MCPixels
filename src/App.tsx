@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type {
+  CSSProperties,
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
+  ReactElement,
 } from "react";
 
 const EMPTY_PIXEL = "transparent";
@@ -17,10 +19,6 @@ const DRAG_THRESHOLD = 5;
 const STORAGE_KEY = "mcpixels.editor.v1";
 const STORAGE_VERSION = 2;
 const MAX_STORED_BYTES = 1_200_000;
-const SELECTION_ACTIONS_WIDTH = 273;
-const SELECTION_ACTIONS_WITH_PASTE_WIDTH = 306;
-const SELECTION_ACTIONS_HEIGHT = 32;
-const SELECTION_ACTIONS_GAP = 8;
 const DEFAULT_EXPORT_SCALE = 8;
 const MAX_EXPORT_SCALE = 64;
 const MAX_EXPORT_DIMENSION = 4096;
@@ -111,6 +109,7 @@ type PointerState =
       historyGroup: number;
       color: string;
       symmetry: Symmetry;
+      pendingChanges?: PixelChange[];
     }
   | {
       kind: "shape";
@@ -124,6 +123,7 @@ type PointerState =
     }
   | { kind: "select"; pointerId: number; anchor: { x: number; y: number } }
   | { kind: "move-selection"; pointerId: number; anchor: { x: number; y: number } }
+  | { kind: "tap-tool"; pointerId: number; tool: "fill" | "picker"; clientX: number; clientY: number }
   | { kind: "pinch"; lastCenter: ScreenPoint; lastDistance: number }
   | {
       kind: "pan";
@@ -173,12 +173,73 @@ const TOOL_SHORTCUTS: Record<string, Tool> = {
   o: "ellipse",
 };
 
+type ShapeOption = {
+  key: string;
+  tool: ShapeTool;
+  style: ShapeStyle | null;
+  label: string;
+  shortcut: string;
+  icon: ReactElement;
+};
+
+const SHAPE_OPTIONS: ShapeOption[] = [
+  {
+    key: "line",
+    tool: "line",
+    style: null,
+    label: "Line",
+    shortcut: "L",
+    icon: <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 19 5" /></svg>,
+  },
+  {
+    key: "rectangle-outline",
+    tool: "rectangle",
+    style: "outline",
+    label: "Rectangle outline",
+    shortcut: "R",
+    icon: <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6.5" width="16" height="11" /></svg>,
+  },
+  {
+    key: "rectangle-filled",
+    tool: "rectangle",
+    style: "filled",
+    label: "Filled rectangle",
+    shortcut: "R",
+    icon: <svg className="filled-shape-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6.5" width="16" height="11" /></svg>,
+  },
+  {
+    key: "ellipse-outline",
+    tool: "ellipse",
+    style: "outline",
+    label: "Ellipse outline",
+    shortcut: "O",
+    icon: <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="12" rx="8" ry="5.5" /></svg>,
+  },
+  {
+    key: "ellipse-filled",
+    tool: "ellipse",
+    style: "filled",
+    label: "Filled ellipse",
+    shortcut: "O",
+    icon: <svg className="filled-shape-icon" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="12" rx="8" ry="5.5" /></svg>,
+  },
+];
+
+function isShapeOptionActive(option: ShapeOption, tool: Tool, style: ShapeStyle) {
+  if (option.tool !== tool) return false;
+  return option.style === null || option.style === style;
+}
+
 function isColorTool(tool: Tool): tool is ColorTool {
   return tool === "paint" || tool === "fill" || tool === "line" || tool === "rectangle" || tool === "ellipse";
 }
 
 function isShapeTool(tool: Tool): tool is ShapeTool {
   return tool === "line" || tool === "rectangle" || tool === "ellipse";
+}
+
+function supportsSymmetry(tool: Tool) {
+  return tool === "paint" || tool === "erase" || tool === "fill" || isShapeTool(tool);
 }
 
 type PixelStore = {
@@ -969,6 +1030,9 @@ function carriesFiles(transfer: DataTransfer | null) {
   return Array.from(transfer?.types ?? []).includes("Files");
 }
 
+type DockPanel = "color" | "shape" | "more" | null;
+type CanvasMenu = { x: number; y: number } | null;
+
 function App() {
   const [initialState] = useState(loadPersistedState);
   const storeRef = useRef<PixelStore | null>(null);
@@ -991,6 +1055,7 @@ function App() {
   const [shapeStyle, setShapeStyle] = useState<ShapeStyle>("outline");
   const [symmetry, setSymmetry] = useState<Symmetry>({ horizontal: false, vertical: false });
   const [shapePreview, setShapePreview] = useState<PixelChange[]>([]);
+  const [touchPreview, setTouchPreview] = useState<PixelChange[]>([]);
   const [viewport, setViewport] = useState<Viewport>(initialState.viewport);
   const [canvasSize, setCanvasSize] = useState({ width: 1, height: 1 });
   const [activity, setActivity] = useState("Canvas ready. Pick a color and draw.");
@@ -1014,7 +1079,12 @@ function App() {
   const [isReadingImport, setIsReadingImport] = useState(false);
   const [isDropTarget, setIsDropTarget] = useState(false);
   const [storageError, setStorageError] = useState("");
+  const [dockPanel, setDockPanel] = useState<DockPanel>(null);
+  const [canvasMenu, setCanvasMenu] = useState<CanvasMenu>(null);
+  const [selectionActionsSize, setSelectionActionsSize] = useState({ width: 0, height: 0 });
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasMenuRef = useRef<HTMLDivElement>(null);
+  const selectionActionsRef = useRef<HTMLDivElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const viewportRef = useRef(viewport);
   const canvasSizeRef = useRef(canvasSize);
@@ -1027,8 +1097,10 @@ function App() {
   const touchPointsRef = useRef(new Map<number, ScreenPoint>());
   const shapePreviewFrameRef = useRef<number | null>(null);
   const spacePressedRef = useRef(false);
-  const suppressContextMenuRef = useRef(false);
   const lastCanvasPointerRef = useRef<ScreenPoint | null>(null);
+  const selectionBeforeTouchRef = useRef<SelectionBounds | null>(null);
+  const rightDragEndedAtRef = useRef(0);
+  const contextMenuOpenedAtRef = useRef(0);
   viewportRef.current = viewport;
   canvasSizeRef.current = canvasSize;
   const fitZoom = fitZoomFor(canvasSize);
@@ -1092,6 +1164,31 @@ function App() {
       return next.x === current.x && next.y === current.y && next.zoom === current.zoom ? current : next;
     });
   }, [canvasSize]);
+
+  useEffect(() => {
+    if (!canvasMenu) return;
+    const frame = window.requestAnimationFrame(() => {
+      canvasMenuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [canvasMenu]);
+
+  useEffect(() => {
+    const actions = selectionActionsRef.current;
+    if (!actions) return;
+    const updateSize = () => {
+      const bounds = actions.getBoundingClientRect();
+      setSelectionActionsSize((current) =>
+        current.width === bounds.width && current.height === bounds.height
+          ? current
+          : { width: bounds.width, height: bounds.height },
+      );
+    };
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(actions);
+    return () => observer.disconnect();
+  }, [copiedSelection, dockPanel, selection]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -1190,6 +1287,17 @@ function App() {
       context.fillRect(screenX(x), screenY(y), zoom, zoom);
     }
     context.globalAlpha = 1;
+    for (const { x, y, color } of touchPreview) {
+      if (!isOnCanvas(x, y)) continue;
+      if (x < minX || x > maxX || y < minY || y > maxY) continue;
+      if (color === EMPTY_PIXEL) {
+        context.fillStyle = "#fafaf7";
+        context.fillRect(screenX(x), screenY(y), zoom, zoom);
+        continue;
+      }
+      context.fillStyle = color;
+      context.fillRect(screenX(x), screenY(y), zoom, zoom);
+    }
 
     if (zoom >= GRID_LINE_ZOOM) {
     context.beginPath();
@@ -1210,12 +1318,12 @@ function App() {
 
     context.lineWidth = 1;
     context.beginPath();
-    context.strokeStyle = symmetry.vertical ? "#ef5938" : "#aeb2ac";
+    context.strokeStyle = supportsSymmetry(tool) && symmetry.vertical ? "#ef5938" : "#aeb2ac";
     context.moveTo(screenX(0), 0);
     context.lineTo(screenX(0), height);
     context.stroke();
     context.beginPath();
-    context.strokeStyle = symmetry.horizontal ? "#ef5938" : "#aeb2ac";
+    context.strokeStyle = supportsSymmetry(tool) && symmetry.horizontal ? "#ef5938" : "#aeb2ac";
     context.moveTo(0, screenY(0));
     context.lineTo(width, screenY(0));
     context.stroke();
@@ -1223,7 +1331,7 @@ function App() {
     context.lineWidth = 2;
     context.strokeStyle = "#9a9d95";
     context.strokeRect(paperLeft, paperTop, CANVAS_SIZE * zoom, CANVAS_SIZE * zoom);
-  }, [canvasSize, cells, fitZoom, history.version, movingSelection, selection, shapePreview, symmetry, viewport]);
+  }, [canvasSize, cells, fitZoom, history.version, movingSelection, selection, shapePreview, symmetry, tool, touchPreview, viewport]);
 
   const getCanvasPoint = (clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
@@ -1241,7 +1349,7 @@ function App() {
     };
   };
 
-  const startDrawingAt = (clientX: number, clientY: number, pointerId: number) => {
+  const startDrawingAt = (clientX: number, clientY: number, pointerId: number, defer = false) => {
     const pixel = getPixelAt(clientX, clientY);
     if (!pixel) return;
     const color = tool === "erase" ? EMPTY_PIXEL : selectedColor;
@@ -1249,7 +1357,19 @@ function App() {
     if (!changes) return;
     historyGroupRef.current += 1;
     const historyGroup = historyGroupRef.current;
-    pointerRef.current = { kind: "draw", pointerId, lastPixel: pixel, historyGroup, color, symmetry };
+    pointerRef.current = {
+      kind: "draw",
+      pointerId,
+      lastPixel: pixel,
+      historyGroup,
+      color,
+      symmetry,
+      pendingChanges: defer ? changes : undefined,
+    };
+    if (defer) {
+      setTouchPreview(changes);
+      return;
+    }
     dispatch({
       type: "paint",
       changes,
@@ -1263,6 +1383,12 @@ function App() {
     if (!pixel || (pixel.x === pointer.lastPixel.x && pixel.y === pointer.lastPixel.y)) return;
     const changes = applySymmetry(pixelsOnLine(pointer.lastPixel, pixel, pointer.color), pointer.symmetry);
     if (!changes) return;
+    if (pointer.pendingChanges) {
+      const pendingChanges = [...pointer.pendingChanges, ...changes];
+      pointerRef.current = { ...pointer, lastPixel: pixel, pendingChanges };
+      setTouchPreview(pendingChanges);
+      return;
+    }
     dispatch({
       type: "paint",
       changes,
@@ -1319,13 +1445,28 @@ function App() {
   const fillAt = (clientX: number, clientY: number) => {
     const pixel = getPixelAt(clientX, clientY);
     if (!pixel) return;
-    const result = floodFill(store.cells, pixel, selectedColor);
-    if (result.changes.length > 0) {
-      dispatch({ type: "paint", changes: result.changes });
-      setActivity(`Filled ${result.changes.length} pixel${result.changes.length === 1 ? "" : "s"}.`);
+    const seeds = applySymmetry([{ ...pixel, color: selectedColor }], symmetry) ?? [];
+    const workingCells = seeds.length > 1 ? store.cells.slice() : store.cells;
+    const changes: PixelChange[] = [];
+    let regions = 0;
+    let reason: FillResult["reason"];
+    for (const seed of seeds) {
+      const result = floodFill(workingCells, seed, selectedColor);
+      reason ??= result.reason;
+      if (result.changes.length === 0) continue;
+      regions += 1;
+      changes.push(...result.changes);
+      if (workingCells !== store.cells) {
+        const replacement = cellFromColor(selectedColor);
+        for (const change of result.changes) workingCells[cellIndex(change.x, change.y)] = replacement;
+      }
+    }
+    if (changes.length > 0) {
+      dispatch({ type: "paint", changes });
+      setActivity(`Filled ${changes.length} pixel${changes.length === 1 ? "" : "s"}${regions > 1 ? ` across ${regions} mirrored regions` : ""}.`);
       return;
     }
-    if (result.reason === "off-canvas") setActivity("That point is outside the canvas.");
+    if (reason === "off-canvas") setActivity("That point is outside the canvas.");
     else setActivity("That area already uses the selected color.");
   };
 
@@ -1371,29 +1512,42 @@ function App() {
     setMovingSelection({ originalBounds: selection, captured });
   };
 
+  const openCanvasMenuAt = (clientX: number, clientY: number) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const bounds = canvas.getBoundingClientRect();
+    const pixel = getPixelAt(clientX, clientY);
+    if (pixel && isOnCanvas(pixel.x, pixel.y)) lastCanvasPointerRef.current = pixel;
+    setDockPanel(null);
+    const menuHeight = selection ? 276 : 216;
+    setCanvasMenu({
+      x: Math.max(8, Math.min(bounds.width - 190, clientX - bounds.left)),
+      y: Math.max(8, Math.min(bounds.height - menuHeight - 68, clientY - bounds.top)),
+    });
+    contextMenuOpenedAtRef.current = performance.now();
+  };
+
   const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (pointerRef.current && !(event.pointerType === "touch" && tool === "pan")) return;
+    setCanvasMenu(null);
+    setDockPanel(null);
     const pointerPixel = getPixelAt(event.clientX, event.clientY);
     if (pointerPixel && isOnCanvas(pointerPixel.x, pointerPixel.y)) lastCanvasPointerRef.current = pointerPixel;
-    const shouldPan =
-      event.button === 1 ||
-      event.button === 2 ||
-      tool === "pan" ||
-      (event.button === 0 && spacePressedRef.current);
-    const shouldFill = event.button === 0 && !shouldPan && tool === "fill";
-    const shouldPickColor = event.button === 0 && !shouldPan && tool === "picker";
-    const shouldSelect = event.button === 0 && !shouldPan && tool === "select";
-    const shouldDraw = event.button === 0 && !shouldPan && (tool === "paint" || tool === "erase");
-    const shouldShape = event.button === 0 && !shouldPan && isShapeTool(tool);
-    if (!shouldPan && !shouldDraw && !shouldFill && !shouldPickColor && !shouldSelect && !shouldShape) return;
-
-    if (event.button !== 2) event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
-
-    if (event.pointerType === "touch" && tool === "pan") {
+    const isTouch = event.pointerType === "touch";
+    if (isTouch) {
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
       touchPointsRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
       const pinch = getPinchMetrics(touchPointsRef.current);
       if (pinch) {
+        const activePointer = pointerRef.current;
+        if (activePointer?.kind === "select") setSelection(selectionBeforeTouchRef.current);
+        if (activePointer?.kind === "move-selection" && movingSelection) {
+          setSelection(movingSelection.originalBounds);
+        }
+        selectionBeforeTouchRef.current = null;
+        setShapePreview([]);
+        setTouchPreview([]);
+        setMovingSelection(null);
         pointerRef.current = {
           kind: "pinch",
           lastCenter: pinch.center,
@@ -1403,9 +1557,26 @@ function App() {
         return;
       }
     }
+    if (pointerRef.current) return;
+    const isContextClick = event.button === 2 || (event.pointerType === "mouse" && event.button === 0 && event.ctrlKey);
+    const shouldPan =
+      event.button === 1 ||
+      isContextClick ||
+      tool === "pan" ||
+      (event.button === 0 && spacePressedRef.current);
+    const shouldFill = event.button === 0 && !shouldPan && tool === "fill";
+    const shouldPickColor = event.button === 0 && !shouldPan && tool === "picker";
+    const shouldSelect = event.button === 0 && !shouldPan && tool === "select";
+    const shouldDraw = event.button === 0 && !shouldPan && (tool === "paint" || tool === "erase");
+    const shouldShape = event.button === 0 && !shouldPan && isShapeTool(tool);
+    if (!shouldPan && !shouldDraw && !shouldFill && !shouldPickColor && !shouldSelect && !shouldShape) return;
+
+    event.preventDefault();
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.setPointerCapture(event.pointerId);
 
     if (shouldSelect) {
       const pixel = getPixelAt(event.clientX, event.clientY);
+      if (isTouch) selectionBeforeTouchRef.current = selection;
       if (pixel && selection && isInsideSelection(pixel, selection)) {
         startMoveSelectionAt(event.clientX, event.clientY, event.pointerId);
       } else {
@@ -1418,19 +1589,26 @@ function App() {
       return;
     }
     if (shouldFill) {
+      if (isTouch) {
+        pointerRef.current = { kind: "tap-tool", pointerId: event.pointerId, tool: "fill", clientX: event.clientX, clientY: event.clientY };
+        return;
+      }
       fillAt(event.clientX, event.clientY);
       return;
     }
     if (shouldPickColor) {
+      if (isTouch) {
+        pointerRef.current = { kind: "tap-tool", pointerId: event.pointerId, tool: "picker", clientX: event.clientX, clientY: event.clientY };
+        return;
+      }
       pickColorAt(event.clientX, event.clientY);
       return;
     }
     if (shouldDraw) {
-      startDrawingAt(event.clientX, event.clientY, event.pointerId);
+      startDrawingAt(event.clientX, event.clientY, event.pointerId, isTouch);
       return;
     }
 
-    if (event.button === 2) suppressContextMenuRef.current = false;
     pointerRef.current = {
       kind: "pan",
       pointerId: event.pointerId,
@@ -1439,8 +1617,9 @@ function App() {
       lastX: event.clientX,
       lastY: event.clientY,
       hasDragged: false,
-      button: event.button,
+      button: isContextClick ? 2 : event.button,
     };
+    setIsPanning(true);
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -1488,6 +1667,8 @@ function App() {
       return;
     }
 
+    if (pointer.kind === "tap-tool") return;
+
     if (pointer.kind === "shape") {
       continueShapeAt(event.clientX, event.clientY, pointer);
       return;
@@ -1527,8 +1708,6 @@ function App() {
       lastY: event.clientY,
       hasDragged: true,
     };
-    if (!pointer.hasDragged) setIsPanning(true);
-    if (pointer.button === 2) suppressContextMenuRef.current = true;
     setViewport((current) =>
       clampViewport({
         ...current,
@@ -1540,16 +1719,28 @@ function App() {
 
   const handlePointerEnd = (event: ReactPointerEvent<HTMLCanvasElement>, cancelled = false) => {
     const activePointer = pointerRef.current;
-    if (activePointer && "pointerId" in activePointer && activePointer.pointerId !== event.pointerId) return;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     touchPointsRef.current.delete(event.pointerId);
     if (cancelled) {
+      if (activePointer?.kind === "select") setSelection(selectionBeforeTouchRef.current);
+      if (activePointer?.kind === "move-selection" && movingSelection) {
+        setSelection(movingSelection.originalBounds);
+      }
+      for (const pointerId of touchPointsRef.current.keys()) {
+        if (event.currentTarget.hasPointerCapture(pointerId)) event.currentTarget.releasePointerCapture(pointerId);
+      }
+      touchPointsRef.current.clear();
+      selectionBeforeTouchRef.current = null;
       setShapePreview([]);
+      setTouchPreview([]);
       setMovingSelection(null);
       pointerRef.current = null;
       setIsPanning(false);
+      return;
+    }
+    if (activePointer && "pointerId" in activePointer && activePointer.pointerId !== event.pointerId) {
       return;
     }
     if (pointerRef.current?.kind === "pinch") {
@@ -1577,6 +1768,20 @@ function App() {
         setIsPanning(Boolean(remainingTouch));
       }
       return;
+    }
+    if (pointerRef.current?.kind === "draw") {
+      const pointer = pointerRef.current;
+      const pendingChanges = pointer.pendingChanges;
+      if (pendingChanges) {
+        dispatch({ type: "paint", changes: pendingChanges });
+        setTouchPreview([]);
+        setActivity(`You ${pointer.color === EMPTY_PIXEL ? "erased" : "painted"} ${pendingChanges.length} pixel${pendingChanges.length === 1 ? "" : "s"}.`);
+      }
+    }
+    if (pointerRef.current?.kind === "tap-tool") {
+      const pointer = pointerRef.current;
+      if (pointer.tool === "fill") fillAt(pointer.clientX, pointer.clientY);
+      else pickColorAt(pointer.clientX, pointer.clientY);
     }
     if (pointerRef.current?.kind === "shape") {
       const pointer = pointerRef.current;
@@ -1607,6 +1812,7 @@ function App() {
         const height = bounds.maxY - bounds.minY + 1;
         setActivity(`Selected ${width} by ${height} pixels.`);
       }
+      selectionBeforeTouchRef.current = null;
     }
     if (pointerRef.current?.kind === "move-selection" && movingSelection) {
       const pointer = pointerRef.current;
@@ -1638,6 +1844,10 @@ function App() {
       }
       setMovingSelection(null);
     }
+    if (pointerRef.current?.kind === "pan" && pointerRef.current.button === 2) {
+      if (pointerRef.current.hasDragged) rightDragEndedAtRef.current = performance.now();
+      else openCanvasMenuAt(event.clientX, event.clientY);
+    }
     pointerRef.current = null;
     setIsPanning(false);
   };
@@ -1663,20 +1873,43 @@ function App() {
 
     const handleWheel = (event: WheelEvent) => {
       event.preventDefault();
+      setCanvasMenu(null);
+      setDockPanel(null);
       const bounds = canvas.getBoundingClientRect();
       const anchor = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
-      const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
-      setViewport((current) => {
-        const zoom = clampZoom(current.zoom * factor, fitZoomFor(canvasSize));
-        if (zoom === current.zoom) return current;
-        const worldX = current.x + (anchor.x - canvasSize.width / 2) / current.zoom;
-        const worldY = current.y + (anchor.y - canvasSize.height / 2) / current.zoom;
-        return clampViewport({
-          x: worldX - (anchor.x - canvasSize.width / 2) / zoom,
-          y: worldY - (anchor.y - canvasSize.height / 2) / zoom,
-          zoom,
-        }, canvasSize);
-      });
+      const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? 16
+        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? canvasSize.height
+          : 1;
+      let deltaX = event.deltaX * unit;
+      let deltaY = event.deltaY * unit;
+      if (event.ctrlKey) {
+        const factor = Math.exp(Math.max(-0.24, Math.min(0.24, -deltaY * 0.01)));
+        setViewport((current) => {
+          const zoom = clampZoom(current.zoom * factor, fitZoomFor(canvasSize));
+          if (zoom === current.zoom) return current;
+          const worldX = current.x + (anchor.x - canvasSize.width / 2) / current.zoom;
+          const worldY = current.y + (anchor.y - canvasSize.height / 2) / current.zoom;
+          return clampViewport({
+            x: worldX - (anchor.x - canvasSize.width / 2) / zoom,
+            y: worldY - (anchor.y - canvasSize.height / 2) / zoom,
+            zoom,
+          }, canvasSize);
+        });
+        return;
+      }
+      if (event.shiftKey && deltaX === 0) {
+        deltaX = deltaY;
+        deltaY = 0;
+      }
+      setViewport((current) =>
+        clampViewport({
+          ...current,
+          x: current.x + deltaX / current.zoom,
+          y: current.y + deltaY / current.zoom,
+        }, canvasSize),
+      );
     };
 
     canvas.addEventListener("wheel", handleWheel, { passive: false });
@@ -1879,6 +2112,7 @@ function App() {
     error: "Tool registration failed",
   }[webMcpStatus];
   const paletteColors = [...customColors, ...PALETTE].slice(0, PALETTE.length);
+  const symmetryEnabled = supportsSymmetry(tool);
 
   const selectionScreen = selection
     ? {
@@ -1891,6 +2125,28 @@ function App() {
   const selectionSize = selection
     ? { width: selection.maxX - selection.minX + 1, height: selection.maxY - selection.minY + 1 }
     : null;
+  const selectionActionsStyle = selectionScreen
+    ? (() => {
+        const gap = 8;
+        const width = selectionActionsSize.width || 360;
+        const height = selectionActionsSize.height || 44;
+        const bottomLimit = Math.max(gap, canvasSize.height - height - 80);
+        const aboveSpace = selectionScreen.top - gap;
+        const belowSpace = canvasSize.height - 80 - selectionScreen.top - selectionScreen.height - gap;
+        const requestedTop = aboveSpace >= height || aboveSpace >= belowSpace
+          ? selectionScreen.top - height - gap
+          : selectionScreen.top + selectionScreen.height + gap;
+        const left = Math.max(
+          gap,
+          Math.min(canvasSize.width - width - gap, selectionScreen.left + selectionScreen.width / 2 - width / 2),
+        );
+        const top = Math.max(gap, Math.min(bottomLimit, requestedTop));
+        return {
+          "--selection-float-left": `${left}px`,
+          "--selection-float-top": `${top}px`,
+        } as CSSProperties;
+      })()
+    : undefined;
   const maxExportScale = selectionSize
     ? Math.max(
         1,
@@ -1925,24 +2181,6 @@ function App() {
       ? `Imports must be at most ${MAX_IMPORT_DIMENSION} pixels per side.`
       : "";
   const importOrigin = importOriginFor(selection, viewport, importDimensions.width, importDimensions.height);
-  const selectionActionsWidth = copiedSelection ? SELECTION_ACTIONS_WITH_PASTE_WIDTH : SELECTION_ACTIONS_WIDTH;
-  const selectionActionsStyle = selectionScreen
-    ? {
-        left: Math.min(
-          Math.max(SELECTION_ACTIONS_GAP, selectionScreen.left + selectionScreen.width - selectionActionsWidth),
-          Math.max(SELECTION_ACTIONS_GAP, canvasSize.width - selectionActionsWidth - SELECTION_ACTIONS_GAP),
-        ),
-        top: Math.min(
-          Math.max(
-            SELECTION_ACTIONS_GAP,
-            selectionScreen.top >= SELECTION_ACTIONS_HEIGHT + SELECTION_ACTIONS_GAP * 2
-              ? selectionScreen.top - SELECTION_ACTIONS_HEIGHT - SELECTION_ACTIONS_GAP
-              : selectionScreen.top + selectionScreen.height + SELECTION_ACTIONS_GAP,
-          ),
-          Math.max(SELECTION_ACTIONS_GAP, canvasSize.height - SELECTION_ACTIONS_HEIGHT - SELECTION_ACTIONS_GAP),
-        ),
-      }
-    : null;
 
   const clearSelection = () => {
     if (!selection) return;
@@ -2358,6 +2596,13 @@ function App() {
       const wantsUndo = modifierPressed && key === "z" && !event.shiftKey;
       const wantsRedo = modifierPressed && ((key === "z" && event.shiftKey) || key === "y");
 
+      if (!isTyping && key === "escape" && (dockPanel || canvasMenu)) {
+        event.preventDefault();
+        setDockPanel(null);
+        setCanvasMenu(null);
+        return;
+      }
+
       if (!panelOpen && !isTyping && wantsUndo && history.undoDepth > 0) {
         event.preventDefault();
         undoPixels();
@@ -2410,6 +2655,8 @@ function App() {
           toolBeforePickerRef.current = isColorTool(tool) ? tool : "paint";
         }
         setTool(shortcutTool);
+        setDockPanel(null);
+        setCanvasMenu(null);
         setActivity(`${shortcutTool === "paint" ? "Draw" : shortcutTool[0].toUpperCase() + shortcutTool.slice(1)} tool selected.`);
         return;
       }
@@ -2431,7 +2678,7 @@ function App() {
       window.removeEventListener("keyup", handleKeyUp);
       window.removeEventListener("blur", handleBlur);
     };
-  }, [canvasSize, copiedSelection, history.redoDepth, history.undoDepth, selection, showExport, showImport, tool]);
+  }, [canvasMenu, canvasSize, copiedSelection, dockPanel, history.redoDepth, history.undoDepth, selection, showExport, showImport, tool]);
 
   return (
     <main className="app-shell">
@@ -2448,7 +2695,7 @@ function App() {
               Not saved
             </div>
           ) : null}
-          <div className={`agent-status agent-status--${webMcpStatus}`}>
+          <div className={`agent-status agent-status--${webMcpStatus}`} title={statusText}>
             <span aria-hidden="true" />
             {statusText}
           </div>
@@ -2456,250 +2703,192 @@ function App() {
       </header>
 
       <section className="editor" aria-label="MCPixels editor">
-        <div className="toolbar" aria-label="Drawing controls">
-          <fieldset className="color-control">
-            <legend>Color</legend>
-            <div className="palette">
-              {paletteColors.map((color, index) => (
+        <div className="bottom-controls" onPointerDown={() => setCanvasMenu(null)}>
+          {dockPanel === "color" ? (
+            <section className="dock-popover dock-popover--color" aria-label="Color palette">
+              <header><span>Color</span><strong>{selectedColor}</strong></header>
+              <div className="palette">
+                {paletteColors.map((color, index) => (
+                  <button
+                    key={index}
+                    className={selectedColor === color ? "swatch swatch--active" : "swatch"}
+                    style={{ backgroundColor: color }}
+                    type="button"
+                    aria-label={`Use color ${color}`}
+                    aria-pressed={selectedColor === color}
+                    onClick={() => {
+                      selectEditorColor(color);
+                      if (!isColorTool(tool)) setTool("paint");
+                    }}
+                  />
+                ))}
+                <label className="custom-color" title="Choose a custom color">
+                  <span>+</span>
+                  <input
+                    type="color"
+                    value={selectedColor}
+                    aria-label="Choose a custom color"
+                    onChange={(event) => {
+                      selectEditorColor(event.target.value);
+                      if (!isColorTool(tool)) setTool("paint");
+                    }}
+                  />
+                </label>
                 <button
-                  key={index}
-                  className={isColorTool(tool) && selectedColor === color ? "swatch swatch--active" : "swatch"}
-                  style={{ backgroundColor: color }}
+                  className={tool === "picker" ? "color-picker-button color-picker-button--active" : "color-picker-button"}
                   type="button"
-                  aria-label={`Use color ${color}`}
-                  aria-pressed={isColorTool(tool) && selectedColor === color}
+                  aria-label="Pick color from canvas"
+                  aria-pressed={tool === "picker"}
+                  aria-keyshortcuts="I"
+                  title="Pick color (I)"
                   onClick={() => {
-                    selectEditorColor(color);
-                    if (!isColorTool(tool)) setTool("paint");
+                    if (tool !== "picker") toolBeforePickerRef.current = isColorTool(tool) ? tool : "paint";
+                    setTool("picker");
+                    setDockPanel(null);
                   }}
-                />
-              ))}
-              <label className="custom-color" title="Choose a custom color">
-                <span>+</span>
-                <input
-                  type="color"
-                  value={selectedColor}
-                  aria-label="Choose a custom color"
-                  onChange={(event) => {
-                    selectEditorColor(event.target.value);
-                    if (!isColorTool(tool)) setTool("paint");
-                  }}
-                />
-              </label>
-              <button
-                className={tool === "picker" ? "color-picker-button color-picker-button--active" : "color-picker-button"}
-                type="button"
-                aria-label="Pick a color from the canvas"
-                aria-pressed={tool === "picker"}
-                aria-keyshortcuts="I"
-                title="Pick color (I)"
-                onClick={() => {
-                  if (tool !== "picker") toolBeforePickerRef.current = isColorTool(tool) ? tool : "paint";
-                  setTool("picker");
-                }}
-              >
-                <svg viewBox="0 0 16 16" aria-hidden="true">
-                  <path d="m9.5 2.5 4 4-2 2-1-1-5.5 5.5H2.5v-2.5L8 5l-1-1zM4.5 11.5h-2" />
-                </svg>
-              </button>
-            </div>
-          </fieldset>
-
-          <fieldset className="mode-control">
-            <legend>Tool</legend>
-            <div className="segmented-control">
-              {(["paint", "erase", "fill", "pan", "select"] as Tool[]).map((mode) => {
-                const label = mode === "paint" ? "Draw" : mode === "erase" ? "Erase" : mode === "fill" ? "Fill" : mode === "pan" ? "Pan" : "Select";
-                const shortcut = mode === "paint" ? "B" : mode === "erase" ? "E" : mode === "fill" ? "G" : mode === "pan" ? "H" : "M";
-                return (
-                  <button
-                    key={mode}
-                    className={tool === mode ? "segment segment--active" : "segment"}
-                    type="button"
-                    aria-pressed={tool === mode}
-                    aria-keyshortcuts={shortcut}
-                    title={`${label} (${shortcut})`}
-                    onClick={() => setTool(mode)}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-          </fieldset>
-
-          <fieldset className="shape-control">
-            <legend>Shape</legend>
-            <div className="segmented-control shape-buttons">
-              {(["line", "rectangle", "ellipse"] as ShapeTool[]).map((mode) => {
-                const label = mode === "rectangle" ? "Rect" : mode[0].toUpperCase() + mode.slice(1);
-                const shortcut = mode === "line" ? "L" : mode === "rectangle" ? "R" : "O";
-                return (
-                  <button
-                    key={mode}
-                    className={tool === mode ? "segment segment--active" : "segment"}
-                    type="button"
-                    aria-pressed={tool === mode}
-                    aria-keyshortcuts={shortcut}
-                    title={`${mode[0].toUpperCase() + mode.slice(1)} (${shortcut})`}
-                    onClick={() => setTool(mode)}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-              {(["outline", "filled"] as ShapeStyle[]).map((style) => (
-                <button
-                  key={style}
-                  className={shapeStyle === style ? "segment segment--active shape-style" : "segment shape-style"}
-                  type="button"
-                  aria-pressed={shapeStyle === style}
-                  onClick={() => setShapeStyle(style)}
                 >
-                  {style === "outline" ? "Out" : "Fill"}
-                </button>
-              ))}
-            </div>
-          </fieldset>
-
-          <fieldset className="symmetry-control">
-            <legend>Mirror</legend>
-            <div className="segmented-control">
-              <button
-                className={symmetry.horizontal ? "segment segment--active" : "segment"}
-                type="button"
-                aria-pressed={symmetry.horizontal}
-                title="Mirror across the horizontal origin axis"
-                onClick={() => {
-                  setSymmetry((current) => ({ ...current, horizontal: !current.horizontal }));
-                  setActivity(`Horizontal mirror ${symmetry.horizontal ? "disabled" : "enabled"}.`);
-                }}
-              >
-                Horizontal
-              </button>
-              <button
-                className={symmetry.vertical ? "segment segment--active" : "segment"}
-                type="button"
-                aria-pressed={symmetry.vertical}
-                title="Mirror across the vertical origin axis"
-                onClick={() => {
-                  setSymmetry((current) => ({ ...current, vertical: !current.vertical }));
-                  setActivity(`Vertical mirror ${symmetry.vertical ? "disabled" : "enabled"}.`);
-                }}
-              >
-                Vertical
-              </button>
-            </div>
-          </fieldset>
-
-          <fieldset className="history-control">
-            <legend>History</legend>
-            <div className="history-buttons">
-              <button
-                type="button"
-                disabled={history.undoDepth === 0}
-                onClick={undoPixels}
-                aria-label="Undo last pixel edit"
-                aria-keyshortcuts="Control+Z Meta+Z"
-                title="Undo (Ctrl/Cmd+Z)"
-              >
-                <svg viewBox="0 0 16 16" aria-hidden="true">
-                  <path d="M6 4 2.5 7.5 6 11M3 7.5h5a5 5 0 0 1 5 5" />
-                </svg>
-              </button>
-              <button
-                type="button"
-                disabled={history.redoDepth === 0}
-                onClick={redoPixels}
-                aria-label="Redo last pixel edit"
-                aria-keyshortcuts="Control+Y Meta+Shift+Z"
-                title="Redo (Ctrl+Y or Cmd+Shift+Z)"
-              >
-                <svg viewBox="0 0 16 16" aria-hidden="true">
-                  <path d="m10 4 3.5 3.5L10 11m3-3.5H8a5 5 0 0 0-5 5" />
-                </svg>
-              </button>
-            </div>
-          </fieldset>
-
-          {selection ? (
-            <fieldset className="selection-nudge-control">
-              <legend>Nudge selection</legend>
-              <div className="selection-nudge-buttons">
-                <button type="button" onClick={() => moveSelectionBy(-1, 0)} aria-label="Move selection one pixel left" title="Move left">
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m7 3-5 5 5 5M2 8h12" /></svg>
-                </button>
-                <button type="button" onClick={() => moveSelectionBy(0, -1)} aria-label="Move selection one pixel up" title="Move up">
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 7 5-5 5 5M8 2v12" /></svg>
-                </button>
-                <button type="button" onClick={() => moveSelectionBy(0, 1)} aria-label="Move selection one pixel down" title="Move down">
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 9 5 5 5-5M8 14V2" /></svg>
-                </button>
-                <button type="button" onClick={() => moveSelectionBy(1, 0)} aria-label="Move selection one pixel right" title="Move right">
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m9 3 5 5-5 5M14 8H2" /></svg>
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m12 2 5 5-2.5 2.5-1-1-7 7H3v-3.5l7-7-1-1zM6 15H3" /></svg>
                 </button>
               </div>
-            </fieldset>
+            </section>
           ) : null}
 
-          <fieldset className="zoom-control">
-            <legend>Zoom</legend>
-            <div className="zoom-buttons">
-              <button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => zoomTo(viewport.zoom / 1.2)}>
-                <svg viewBox="0 0 16 16" aria-hidden="true">
-                  <circle cx="6.5" cy="6.5" r="4" />
-                  <path d="M4.5 6.5h4m1 3 4 4" />
-                </svg>
-              </button>
-              <button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => zoomTo(viewport.zoom * 1.2)}>
-                <svg viewBox="0 0 16 16" aria-hidden="true">
-                  <circle cx="6.5" cy="6.5" r="4" />
-                  <path d="M4.5 6.5h4m-2-2v4m3-1 4 4" />
-                </svg>
-              </button>
-              <button
-                className="home-button"
-                type="button"
-                onClick={() => setViewport({ x: 0, y: 0, zoom: DEFAULT_ZOOM })}
-              >
-                Center
-              </button>
-            </div>
-          </fieldset>
+          {dockPanel === "shape" ? (
+            <section className="dock-popover dock-popover--shape" aria-label="Shape settings">
+              <header>
+                <span>Shape</span>
+                <strong>{SHAPE_OPTIONS.find((option) => isShapeOptionActive(option, tool, shapeStyle))?.label ?? "Line"}</strong>
+              </header>
+              <div className="popover-shapes">
+                {SHAPE_OPTIONS.map((option) => {
+                  const active = isShapeOptionActive(option, tool, shapeStyle);
+                  return (
+                    <button
+                      key={option.key}
+                      className={active ? "popover-option popover-option--active" : "popover-option"}
+                      type="button"
+                      aria-label={option.label}
+                      aria-pressed={active}
+                      aria-keyshortcuts={option.shortcut}
+                      title={`${option.label} (${option.shortcut})`}
+                      onClick={() => {
+                        setTool(option.tool);
+                        if (option.style) setShapeStyle(option.style);
+                      }}
+                    >
+                      {option.icon}
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          ) : null}
 
-          <div className="file-actions">
-            <button
-              className="import-button"
-              type="button"
-              title="Import an image (drop or paste one too)"
-              onClick={() => importInputRef.current?.click()}
-            >
-              Import
+          {dockPanel === "more" ? (
+            <section className="dock-popover dock-popover--more" aria-label="More canvas controls">
+              <header><span>Files</span><strong>Canvas</strong></header>
+              <div className="popover-grid popover-grid--files popover-grid--icon-actions">
+                <button
+                  type="button"
+                  aria-label="Import image"
+                  title="Import image"
+                  onClick={() => { setDockPanel(null); importInputRef.current?.click(); }}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m-4-4 4 4 4-4M5 18h14" /></svg>
+                </button>
+                <button
+                  type="button"
+                  disabled
+                  aria-label="Export canvas, coming soon"
+                  title="Export canvas (coming soon)"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m-4 4 4-4 4 4M5 18h14" /></svg>
+                </button>
+                <button
+                  className="danger-option"
+                  type="button"
+                  aria-label="Clear canvas"
+                  title="Clear canvas (undoable)"
+                  onClick={() => {
+                    dispatch({ type: "clear" });
+                    setDockPanel(null);
+                    setActivity("You cleared the canvas.");
+                  }}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" /></svg>
+                </button>
+              </div>
+            </section>
+          ) : null}
+
+          <div className="toolbar" role="toolbar" aria-label="Drawing tools">
+            <button className={tool === "select" ? "dock-button dock-button--active" : "dock-button"} type="button" aria-label="Select" aria-pressed={tool === "select"} aria-keyshortcuts="M" title="Select (M)" onClick={() => { setTool("select"); setDockPanel(null); }}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5v16l4.2-4.2 3.1 5.2 3-1.8-3.1-5.1H19z" /></svg>
+            </button>
+            <button className={tool === "pan" ? "dock-button dock-button--active" : "dock-button"} type="button" aria-label="Hand tool" aria-pressed={tool === "pan"} aria-keyshortcuts="H" title="Hand (H)" onClick={() => { setTool("pan"); setDockPanel(null); }}>
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 10V5.5a1.5 1.5 0 0 1 3 0V9M9 5V3.5a1.5 1.5 0 0 1 3 0V9M12 5a1.5 1.5 0 0 1 3 0v5M15 7.5a1.5 1.5 0 0 1 3 0V12c0 4-2.5 6-6.5 6H10c-2 0-3-1-4-2.5L2.5 11A1.6 1.6 0 0 1 5 9z" /></svg>
+            </button>
+            <span className="dock-divider" aria-hidden="true" />
+            <button className={tool === "paint" ? "dock-button dock-button--active" : "dock-button"} type="button" aria-label="Draw" aria-pressed={tool === "paint"} aria-keyshortcuts="B" title="Draw (B)" onClick={() => { setTool("paint"); setDockPanel(null); }}>
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 14 1.2-4.2L13 2l5 5-7.8 7.8L6 16zM12 3l5 5M4 14l2 2" /></svg>
+            </button>
+            <button className={tool === "erase" ? "dock-button dock-button--active" : "dock-button"} type="button" aria-label="Erase" aria-pressed={tool === "erase"} aria-keyshortcuts="E" title="Erase (E)" onClick={() => { setTool("erase"); setDockPanel(null); }}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3.5 14 9.5-9.5 7 7-7.5 7.5H8.5zM8 9.5l7 7M12.5 19H21" /></svg>
+            </button>
+            <button className={tool === "fill" ? "dock-button dock-button--active" : "dock-button"} type="button" aria-label="Fill" aria-pressed={tool === "fill"} aria-keyshortcuts="G" title="Fill (G)" onClick={() => { setTool("fill"); setDockPanel(null); }}>
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 6-7 6 6-7 7zM7 6l6 6M15 14c0-1 1.5-3 1.5-3s1.5 2 1.5 3a1.5 1.5 0 0 1-3 0" /></svg>
+            </button>
+            <button className={isShapeTool(tool) || dockPanel === "shape" ? "dock-button dock-button--active" : "dock-button"} type="button" aria-label="Shapes" aria-pressed={isShapeTool(tool)} aria-expanded={dockPanel === "shape"} title="Shapes (L/R/O)" onClick={() => { if (!isShapeTool(tool)) setTool("line"); setDockPanel((current) => current === "shape" ? null : "shape"); }}>
+              <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="8" height="8" /><circle cx="14" cy="13" r="4" /></svg>
             </button>
             <button
-              className="clear-button"
+              className={dockPanel === "color" || tool === "picker" ? "dock-button dock-button--active color-dock-button" : "dock-button color-dock-button"}
               type="button"
-              onClick={() => {
-                dispatch({ type: "clear" });
-                setActivity("You cleared the canvas.");
-              }}
+              aria-label="Colors"
+              aria-expanded={dockPanel === "color"}
+              title="Colors"
+              onClick={() => setDockPanel((current) => current === "color" ? null : "color")}
             >
-              Clear all
+              <span style={{ backgroundColor: selectedColor }} />
+            </button>
+            <span className="dock-divider" aria-hidden="true" />
+            <button className={symmetryEnabled && symmetry.horizontal ? "dock-button dock-button--active" : "dock-button"} type="button" disabled={!symmetryEnabled} aria-label="Mirror horizontally" aria-pressed={symmetry.horizontal} title={symmetryEnabled ? "Mirror across horizontal axis" : "Mirror is available with drawing tools"} onClick={() => { setSymmetry((current) => ({ ...current, horizontal: !current.horizontal })); setDockPanel(null); }}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h18M7 8l5-5 5 5M7 16l5 5 5-5" /></svg>
+            </button>
+            <button className={symmetryEnabled && symmetry.vertical ? "dock-button dock-button--active" : "dock-button"} type="button" disabled={!symmetryEnabled} aria-label="Mirror vertically" aria-pressed={symmetry.vertical} title={symmetryEnabled ? "Mirror across vertical axis" : "Mirror is available with drawing tools"} onClick={() => { setSymmetry((current) => ({ ...current, vertical: !current.vertical })); setDockPanel(null); }}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M8 7l-5 5 5 5M16 7l5 5-5 5" /></svg>
+            </button>
+            <span className="dock-divider" aria-hidden="true" />
+            <button className={dockPanel === "more" ? "dock-button dock-button--active" : "dock-button"} type="button" aria-label="More controls" aria-expanded={dockPanel === "more"} title="More" onClick={() => setDockPanel((current) => current === "more" ? null : "more")}>
+              <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="4" cy="10" r="1" /><circle cx="10" cy="10" r="1" /><circle cx="16" cy="10" r="1" /></svg>
             </button>
           </div>
-          <input
-            ref={importInputRef}
-            hidden
-            type="file"
-            accept="image/*"
-            aria-label="Import an image onto the canvas"
-            onChange={(event) => {
-              const file = event.target.files?.[0] ?? null;
-              event.target.value = "";
-              void readImportFile(file);
-            }}
-          />
         </div>
+
+        <div className={`utility-dock history-dock${selection ? " utility-dock--selection" : ""}`} role="toolbar" aria-label="History controls" onPointerDown={() => { setCanvasMenu(null); setDockPanel(null); }}>
+          <button type="button" disabled={history.undoDepth === 0} onClick={undoPixels} aria-label="Undo" title="Undo (Ctrl/Cmd+Z)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m8 5-4 4 4 4M4 9h6a6 6 0 0 1 6 6" /></svg></button>
+          <button type="button" disabled={history.redoDepth === 0} onClick={redoPixels} aria-label="Redo" title="Redo"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m12 5 4 4-4 4m4-4h-6a6 6 0 0 0-6 6" /></svg></button>
+        </div>
+        <div className={`utility-dock view-dock${selection ? " utility-dock--selection" : ""}`} role="toolbar" aria-label="View controls" onPointerDown={() => { setCanvasMenu(null); setDockPanel(null); }}>
+          <button type="button" onClick={() => zoomTo(viewport.zoom / 1.2)} aria-label="Zoom out" title="Zoom out"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10h10" /></svg></button>
+          <button type="button" onClick={() => zoomTo(viewport.zoom * 1.2)} aria-label="Zoom in" title="Zoom in"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10h10M10 5v10" /></svg></button>
+          <span aria-hidden="true" />
+          <button type="button" onClick={() => setViewport({ x: 0, y: 0, zoom: DEFAULT_ZOOM })} aria-label="Center view" title="Center view"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="4" /><path d="M10 2v3M10 15v3M2 10h3M15 10h3" /></svg></button>
+        </div>
+
+        <input
+          ref={importInputRef}
+          hidden
+          type="file"
+          accept="image/*"
+          aria-label="Import an image onto the canvas"
+          onChange={(event) => {
+            const file = event.target.files?.[0] ?? null;
+            event.target.value = "";
+            setDockPanel(null);
+            void readImportFile(file);
+          }}
+        />
 
         <div
           className={`canvas-column${showExport || showImport ? " canvas-column--exporting" : ""}${isDropTarget ? " canvas-column--dropping" : ""}`}
@@ -2723,21 +2912,29 @@ function App() {
           <canvas
             ref={canvasRef}
             className={`pixel-canvas pixel-canvas--${tool}${isPanning ? " pixel-canvas--panning" : ""}${movingSelection ? " pixel-canvas--moving" : ""}`}
-            aria-label="Pixel canvas, 1024 by 1024 cells. Use Draw, Erase, Fill, Line, Rectangle, Ellipse, Pick color, or Select; enable horizontal or vertical mirroring around the origin axes; right-drag or Space-drag to pan, and use the mouse wheel to zoom."
+            aria-label="Pixel canvas, 1024 by 1024 cells. Use Draw, Erase, Fill, Line, Rectangle, Ellipse, Pick color, or Select; right-drag, Space-drag, or scroll to pan, and pinch or Control-scroll to zoom."
             tabIndex={0}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerEnd}
             onPointerCancel={(event) => handlePointerEnd(event, true)}
-            onKeyDown={handleCanvasKeyDown}
-            onContextMenu={(event) => {
-              if (suppressContextMenuRef.current) {
-                event.preventDefault();
-                suppressContextMenuRef.current = false;
+            onLostPointerCapture={(event) => {
+              const activePointer = pointerRef.current;
+              if (activePointer && "pointerId" in activePointer && activePointer.pointerId === event.pointerId) {
+                handlePointerEnd(event, true);
               }
             }}
+            onKeyDown={handleCanvasKeyDown}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              const activePointer = pointerRef.current;
+              if (activePointer?.kind === "pan" && activePointer.button === 2) return;
+              const now = performance.now();
+              if (now - rightDragEndedAtRef.current < 400 || now - contextMenuOpenedAtRef.current < 250) return;
+              openCanvasMenuAt(event.clientX, event.clientY);
+            }}
           />
-          {selectionScreen && selectionActionsStyle ? (
+          {selectionScreen ? (
             <>
               <div
                 className="selection-outline"
@@ -2749,8 +2946,9 @@ function App() {
                 }}
                 aria-hidden="true"
               />
-              {movingSelection ? null : (
+              {movingSelection || dockPanel ? null : (
               <div
+                ref={selectionActionsRef}
                 className={`selection-actions${copiedSelection ? " selection-actions--with-paste" : ""}`}
                 style={selectionActionsStyle}
                 aria-label="Selection actions"
@@ -2760,6 +2958,7 @@ function App() {
                     <path d="M3.5 4.5h9M6 4.5v-2h4v2m1.5 0-.6 9h-5.8l-.6-9M7 7v4M9 7v4" />
                   </svg>
                 </button>
+                <span className="selection-action-separator" aria-hidden="true" />
                 <button
                   type="button"
                   onClick={copySelection}
@@ -2798,6 +2997,7 @@ function App() {
                     </svg>
                   </button>
                 ) : null}
+                <span className="selection-action-separator" aria-hidden="true" />
                 <button
                   type="button"
                   onClick={flipSelectionHorizontal}
@@ -2831,6 +3031,7 @@ function App() {
                     <path d="M13.5 10a6 6 0 1 1-1.5-6L15 7" />
                   </svg>
                 </button>
+                <span className="selection-action-separator" aria-hidden="true" />
                 <button
                   type="button"
                   onClick={openExportPanel}
@@ -2850,6 +3051,48 @@ function App() {
               </div>
               )}
             </>
+          ) : null}
+          {canvasMenu ? (
+            <div
+              ref={canvasMenuRef}
+              className="canvas-context-menu"
+              style={{ left: canvasMenu.x, top: canvasMenu.y }}
+              role="menu"
+              aria-label="Canvas menu"
+              onPointerDown={(event) => event.stopPropagation()}
+              onKeyDown={(event) => {
+                const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
+                const currentIndex = buttons.indexOf(document.activeElement as HTMLButtonElement);
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setCanvasMenu(null);
+                  canvasRef.current?.focus();
+                  return;
+                }
+                if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+                event.preventDefault();
+                event.stopPropagation();
+                const nextIndex = event.key === "Home"
+                  ? 0
+                  : event.key === "End"
+                    ? buttons.length - 1
+                    : event.key === "ArrowDown"
+                      ? (currentIndex + 1) % buttons.length
+                      : (currentIndex - 1 + buttons.length) % buttons.length;
+                buttons[nextIndex]?.focus();
+              }}
+            >
+              <button type="button" role="menuitem" disabled={!copiedSelection} onClick={() => { pasteSelection(); setCanvasMenu(null); }}>Paste here</button>
+              {selection ? <button type="button" role="menuitem" onClick={() => { copySelection(); setCanvasMenu(null); }}>Copy selection</button> : null}
+              {selection ? <button type="button" role="menuitem" onClick={() => { clearSelection(); setCanvasMenu(null); }}>Delete selection</button> : null}
+              <span aria-hidden="true" />
+              <button type="button" role="menuitem" disabled={history.undoDepth === 0} onClick={() => { undoPixels(); setCanvasMenu(null); }}>Undo</button>
+              <button type="button" role="menuitem" disabled={history.redoDepth === 0} onClick={() => { redoPixels(); setCanvasMenu(null); }}>Redo</button>
+              <span aria-hidden="true" />
+              <button type="button" role="menuitem" onClick={() => { setCanvasMenu(null); importInputRef.current?.click(); }}>Import image</button>
+              <button type="button" role="menuitem" onClick={() => { setViewport({ x: 0, y: 0, zoom: DEFAULT_ZOOM }); setCanvasMenu(null); }}>Center view</button>
+            </div>
           ) : null}
           {showExport && selectionSize ? (
             <div

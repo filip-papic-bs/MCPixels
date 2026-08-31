@@ -17,7 +17,7 @@ The app works as a normal pixel editor in every modern browser. In a WebMCP-comp
 - `set_canvas_view`
 - `clear_sprite`
 
-Editor shortcuts follow desktop conventions: use Ctrl/Cmd+Z to undo, Ctrl+Y or Cmd+Shift+Z to redo, and Ctrl/Cmd+C, X, and V to copy, cut, and paste a pixel selection. Arrow keys nudge a selection by one pixel or pan the canvas when no selection is active. On mobile, the toolbar provides the same history and selection actions, including precise one-pixel nudge buttons.
+Editor shortcuts follow desktop conventions: use Ctrl/Cmd+Z to undo, Ctrl+Y or Cmd+Shift+Z to redo, and Ctrl/Cmd+C, X, and V to copy, cut, and paste a pixel selection. Arrow keys nudge a selection by one pixel or pan the canvas when no selection is active. On desktop, scroll or right-drag to pan, pinch or Ctrl-scroll to zoom, and right-click or two-finger tap for canvas actions. On mobile, two fingers always pan and pinch-zoom regardless of the active tool.
 
 For ChatGPT, open the app in the ChatGPT desktop app's built-in browser and inspect **Site tools** in the address bar. For Chrome testing, enable `chrome://flags/#enable-webmcp-testing` in a compatible Chrome build.
 
