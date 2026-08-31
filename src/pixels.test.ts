@@ -6,6 +6,7 @@ import {
   applyPixelAction,
   applySymmetry,
   brushStamp,
+  captureRegion,
   cellFromColor,
   cellIndex,
   createPixelStore,
@@ -17,6 +18,7 @@ import {
   pixelsOnLine,
   rasterizeImportSource,
   stepBrushSize,
+  transformRegion,
 } from "./pixels.ts";
 
 const emptyCells = () => new Uint32Array(CANVAS_SIZE * CANVAS_SIZE);
@@ -61,6 +63,58 @@ test("undo and redo restore the exact cells around a move", () => {
   assert.equal(store.undoStack.at(-1)?.selectionAfter?.minX, 5);
 });
 
+test("rotating a non-square region swaps its dimensions and corners", () => {
+  const cells = emptyCells();
+  // A 3 wide by 5 tall region with a marker at its top-left and bottom-right.
+  paint(cells, 0, 0, "#ff5c35");
+  paint(cells, 2, 4, "#2d7ff9");
+  const captured = captureRegion(cells, { minX: 0, minY: 0, maxX: 2, maxY: 4 });
+  assert.deepEqual([captured.width, captured.height], [3, 5]);
+
+  const rotated = transformRegion(captured, "rotate");
+  assert.deepEqual([rotated.width, rotated.height], [5, 3]);
+  // Clockwise: the top-left corner lands top-right, the bottom-right lands bottom-left.
+  assert.deepEqual(
+    rotated.pixels.find((pixel) => pixel.color === "#ff5c35"),
+    { x: 4, y: 0, color: "#ff5c35" },
+  );
+  assert.deepEqual(
+    rotated.pixels.find((pixel) => pixel.color === "#2d7ff9"),
+    { x: 0, y: 2, color: "#2d7ff9" },
+  );
+
+  const twice = transformRegion(transformRegion(rotated, "rotate"), "flip-left-right");
+  assert.deepEqual([twice.width, twice.height], [3, 5]);
+});
+
+test("a coalesced history group reports only the newly written bounds", () => {
+  const store = createPixelStore(emptyCells());
+  const first = applyPixelAction(store, {
+    type: "paint",
+    changes: [{ x: 0, y: 0, color: "#ff5c35" }],
+    historyGroup: 7,
+  });
+  assert.deepEqual(first.bounds, { minX: 0, minY: 0, maxX: 0, maxY: 0 });
+
+  const second = applyPixelAction(store, {
+    type: "paint",
+    changes: [{ x: 10, y: 12, color: "#ff5c35" }],
+    historyGroup: 7,
+  });
+  assert.equal(store.undoStack.length, 1, "the same group continues one patch");
+  assert.deepEqual(second.bounds, { minX: 10, minY: 12, maxX: 10, maxY: 12 });
+
+  const repeat = applyPixelAction(store, {
+    type: "paint",
+    changes: [{ x: 10, y: 12, color: "#ff5c35" }],
+    historyGroup: 7,
+  });
+  assert.deepEqual(repeat, { changed: false, bounds: null });
+
+  const undone = applyPixelAction(store, { type: "undo" });
+  assert.deepEqual(undone.bounds, { minX: 0, minY: 0, maxX: 10, maxY: 12 });
+});
+
 test("flood fill stays inside a closed border", () => {
   const cells = emptyCells();
   for (let at = -3; at <= 3; at += 1) {
@@ -87,7 +141,12 @@ test("shapes trace outlines and mirror across both axes", () => {
   const mirrored = applySymmetry([{ x: 2, y: 5, color: "#2d7ff9" }], { horizontal: true, vertical: true });
   assert.deepEqual(
     mirrored?.map(({ x, y }) => [x, y]).sort(),
-    [[-3, -6], [-3, 5], [2, -6], [2, 5]].sort(),
+    [
+      [-3, -6],
+      [-3, 5],
+      [2, -6],
+      [2, 5],
+    ].sort(),
   );
 });
 

@@ -26,16 +26,7 @@ export const MAX_SHAPE_PIXELS = 50_000;
 export const MAX_CUSTOM_COLORS = 8;
 export const BRUSH_SIZES = [1, 2, 3, 4, 6, 8];
 export const COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
-export const PALETTE = [
-  "#161616",
-  "#f5f1e8",
-  "#ff5c35",
-  "#ffbd2e",
-  "#45b86b",
-  "#2d7ff9",
-  "#7557d3",
-  "#e54888",
-];
+export const PALETTE = ["#161616", "#f5f1e8", "#ff5c35", "#ffbd2e", "#45b86b", "#2d7ff9", "#7557d3", "#e54888"];
 
 export type PixelChange = { x: number; y: number; color: string };
 export type PixelAction =
@@ -60,6 +51,8 @@ export type PixelPatch = {
   selectionAfter?: SelectionBounds;
 };
 export type HistoryState = { version: number; undoDepth: number; redoDepth: number };
+export type EditOutcome = { changed: boolean; bounds: SelectionBounds | null };
+export type RegionTransform = "flip-left-right" | "flip-top-bottom" | "rotate";
 export type Viewport = { x: number; y: number; zoom: number };
 export type SelectionBounds = { minX: number; minY: number; maxX: number; maxY: number };
 export type CopiedSelection = { pixels: PixelChange[]; width: number; height: number; origin: ScreenPoint };
@@ -93,6 +86,7 @@ export type PersistedEditorState = {
   viewport: Viewport;
   selectedColor: string;
   customColors: string[];
+  autoFollow: boolean;
 };
 export type PointerState =
   | {
@@ -146,6 +140,18 @@ export const colorFromCell = (cell: number) => `#${((cell & 0xffffff) | 0x100000
 
 export const clampToCanvas = (value: number) => Math.max(CANVAS_MIN, Math.min(CANVAS_MAX, value));
 
+/**
+ * Clamps a rectangle to the canvas, or returns null when it does not overlap at
+ * all. `clampSelectionToCanvas` moves each edge independently, so a wholly
+ * off-canvas rectangle collapses onto the nearest real row or column instead of
+ * vanishing — which silently makes an out-of-range request act on live pixels.
+ */
+export function intersectCanvas(bounds: SelectionBounds): SelectionBounds | null {
+  if (bounds.maxX < CANVAS_MIN || bounds.minX > CANVAS_MAX) return null;
+  if (bounds.maxY < CANVAS_MIN || bounds.minY > CANVAS_MAX) return null;
+  return clampSelectionToCanvas(bounds);
+}
+
 export function clampSelectionToCanvas(bounds: SelectionBounds): SelectionBounds {
   return {
     minX: clampToCanvas(bounds.minX),
@@ -183,7 +189,10 @@ export function recordCell(patch: PixelPatch, index: number, before: number, aft
 }
 
 export function trimHistory(store: PixelStore) {
-  while (store.undoStack.length > HISTORY_LIMIT || (store.cellCount > HISTORY_CELL_LIMIT && store.undoStack.length > 1)) {
+  while (
+    store.undoStack.length > HISTORY_LIMIT ||
+    (store.cellCount > HISTORY_CELL_LIMIT && store.undoStack.length > 1)
+  ) {
     const dropped = store.undoStack.shift();
     if (!dropped) return;
     store.cellCount -= dropped.indices.length;
@@ -214,28 +223,45 @@ export function applyPixelChanges(store: PixelStore, patch: PixelPatch, changes:
   }
 }
 
-export function applyPixelAction(store: PixelStore, action: PixelAction) {
+export function indicesBounds(indices: number[], from = 0): SelectionBounds | null {
+  if (from >= indices.length) return null;
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (let entry = from; entry < indices.length; entry += 1) {
+    const x = cellX(indices[entry]);
+    const y = cellY(indices[entry]);
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+export function applyPixelAction(store: PixelStore, action: PixelAction): EditOutcome {
   if (action.type === "undo") {
     const patch = store.undoStack.pop();
-    if (!patch) return false;
+    if (!patch) return { changed: false, bounds: null };
     for (let entry = patch.indices.length - 1; entry >= 0; entry -= 1) {
       store.cells[patch.indices[entry]] = patch.before[entry];
     }
     store.redoStack.push(patch);
-    return true;
+    return { changed: true, bounds: indicesBounds(patch.indices) };
   }
 
   if (action.type === "redo") {
     const patch = store.redoStack.pop();
-    if (!patch) return false;
+    if (!patch) return { changed: false, bounds: null };
     for (let entry = 0; entry < patch.indices.length; entry += 1) {
       store.cells[patch.indices[entry]] = patch.after[entry];
     }
     store.undoStack.push(patch);
-    return true;
+    return { changed: true, bounds: indicesBounds(patch.indices) };
   }
 
-  const historyGroup = action.type === "paint" ? action.historyGroup ?? null : null;
+  const historyGroup = action.type === "paint" ? (action.historyGroup ?? null) : null;
   const open = store.undoStack.at(-1);
   const continues = historyGroup !== null && open !== undefined && open.historyGroup === historyGroup;
   const patch: PixelPatch = continues && open ? open : { indices: [], before: [], after: [], historyGroup };
@@ -260,13 +286,14 @@ export function applyPixelAction(store: PixelStore, action: PixelAction) {
   }
 
   const written = patch.indices.length - started;
-  if (written === 0) return false;
+  if (written === 0) return { changed: false, bounds: null };
+  const bounds = indicesBounds(patch.indices, started);
   for (const dropped of store.redoStack) store.cellCount -= dropped.indices.length;
   store.redoStack.length = 0;
   store.cellCount += written;
   if (!continues) store.undoStack.push(patch);
   trimHistory(store);
-  return true;
+  return { changed: true, bounds };
 }
 
 export function readPaintedPixels(cells: Uint32Array) {
@@ -493,6 +520,7 @@ export function loadPersistedState(): PersistedEditorState {
     viewport: { x: 0, y: 0, zoom: DEFAULT_ZOOM },
     selectedColor: PALETTE[0],
     customColors: [],
+    autoFollow: true,
   };
 
   try {
@@ -538,7 +566,8 @@ export function loadPersistedState(): PersistedEditorState {
       .filter((color, index, colors) => colors.indexOf(color) === index)
       .slice(0, MAX_CUSTOM_COLORS);
 
-    return { cells, viewport, selectedColor, customColors };
+    // Absent means on, so an older save keeps the default rather than losing it.
+    return { cells, viewport, selectedColor, customColors, autoFollow: saved.autoFollow !== false };
   } catch (error) {
     console.warn("Could not restore the saved MCPixels canvas", error);
     return fallback;
@@ -626,13 +655,8 @@ export function pixelsInShape(
   const changes: PixelChange[] = [];
 
   if (tool === "rectangle") {
-    const pixelCount = style === "filled"
-      ? width * height
-      : width === 1
-        ? height
-        : height === 1
-          ? width
-          : width * 2 + (height - 2) * 2;
+    const pixelCount =
+      style === "filled" ? width * height : width === 1 ? height : height === 1 ? width : width * 2 + (height - 2) * 2;
     if (pixelCount > MAX_SHAPE_PIXELS) return null;
 
     if (style === "filled") {
@@ -905,7 +929,12 @@ export function fitImportDimensions(width: number, height: number) {
 export async function decodeImageFile(file: File) {
   if (typeof createImageBitmap === "function") {
     const bitmap = await createImageBitmap(file);
-    return { image: bitmap as CanvasImageSource, width: bitmap.width, height: bitmap.height, release: () => bitmap.close() };
+    return {
+      image: bitmap as CanvasImageSource,
+      width: bitmap.width,
+      height: bitmap.height,
+      release: () => bitmap.close(),
+    };
   }
   const url = URL.createObjectURL(file);
   try {
@@ -959,8 +988,7 @@ export async function readImportSource(file: File): Promise<ImportSource> {
 }
 
 export function importOriginFor(selection: SelectionBounds | null, viewport: Viewport, width: number, height: number) {
-  const clamp = (value: number, size: number) =>
-    Math.max(CANVAS_MIN, Math.min(CANVAS_MAX - size + 1, value));
+  const clamp = (value: number, size: number) => Math.max(CANVAS_MIN, Math.min(CANVAS_MAX - size + 1, value));
   return {
     x: clamp(selection ? selection.minX : Math.round(viewport.x) - Math.floor(width / 2), width),
     y: clamp(selection ? selection.minY : Math.round(viewport.y) - Math.floor(height / 2), height),
@@ -981,4 +1009,158 @@ export function findImageFile(files: FileList | null | undefined, items?: DataTr
 
 export function carriesFiles(transfer: DataTransfer | null) {
   return Array.from(transfer?.types ?? []).includes("Files");
+}
+
+export function captureRegion(cells: Uint32Array, bounds: SelectionBounds): CopiedSelection {
+  const pixels: PixelChange[] = [];
+  const area = clampSelectionToCanvas(bounds);
+  for (let y = area.minY; y <= area.maxY; y += 1) {
+    for (let x = area.minX; x <= area.maxX; x += 1) {
+      const cell = cells[cellIndex(x, y)];
+      if (cell === EMPTY_CELL) continue;
+      pixels.push({ x: x - bounds.minX, y: y - bounds.minY, color: colorFromCell(cell) });
+    }
+  }
+  return {
+    pixels,
+    width: bounds.maxX - bounds.minX + 1,
+    height: bounds.maxY - bounds.minY + 1,
+    origin: { x: bounds.minX, y: bounds.minY },
+  };
+}
+
+export function placeRegion(captured: CopiedSelection, origin: ScreenPoint): PixelChange[] {
+  return captured.pixels.map(({ x, y, color }) => ({ x: origin.x + x, y: origin.y + y, color }));
+}
+
+export function transformRegion(captured: CopiedSelection, kind: RegionTransform): CopiedSelection {
+  const { width, height } = captured;
+  const rotated = kind === "rotate";
+  const pixels = captured.pixels.map(({ x, y, color }) => {
+    if (kind === "flip-left-right") return { x: width - 1 - x, y, color };
+    if (kind === "flip-top-bottom") return { x, y: height - 1 - y, color };
+    return { x: height - 1 - y, y: x, color };
+  });
+  return {
+    pixels,
+    width: rotated ? height : width,
+    height: rotated ? width : height,
+    origin: captured.origin,
+  };
+}
+
+export function offsetSelection(bounds: SelectionBounds, dx: number, dy: number): SelectionBounds | null {
+  if (
+    bounds.minX + dx < CANVAS_MIN ||
+    bounds.maxX + dx > CANVAS_MAX ||
+    bounds.minY + dy < CANVAS_MIN ||
+    bounds.maxY + dy > CANVAS_MAX
+  ) {
+    return null;
+  }
+  return {
+    minX: bounds.minX + dx,
+    minY: bounds.minY + dy,
+    maxX: bounds.maxX + dx,
+    maxY: bounds.maxY + dy,
+  };
+}
+
+export function boundsForOrigin(origin: ScreenPoint, width: number, height: number): SelectionBounds {
+  return { minX: origin.x, minY: origin.y, maxX: origin.x + width - 1, maxY: origin.y + height - 1 };
+}
+
+export function clampOriginToCanvas(origin: ScreenPoint, width: number, height: number): ScreenPoint {
+  return {
+    x: Math.max(CANVAS_MIN, Math.min(CANVAS_MAX - width + 1, origin.x)),
+    y: Math.max(CANVAS_MIN, Math.min(CANVAS_MAX - height + 1, origin.y)),
+  };
+}
+
+export function boundsOfChanges(changes: PixelChange[]): SelectionBounds | null {
+  if (changes.length === 0) return null;
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const { x, y } of changes) {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+export function unionBounds(a: SelectionBounds | null, b: SelectionBounds | null): SelectionBounds | null {
+  if (!a) return b;
+  if (!b) return a;
+  return {
+    minX: Math.min(a.minX, b.minX),
+    minY: Math.min(a.minY, b.minY),
+    maxX: Math.max(a.maxX, b.maxX),
+    maxY: Math.max(a.maxY, b.maxY),
+  };
+}
+
+export function paintedBounds(cells: Uint32Array): SelectionBounds | null {
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  let found = false;
+  for (let index = 0; index < cells.length; index += 1) {
+    if (cells[index] === EMPTY_CELL) continue;
+    found = true;
+    const x = cellX(index);
+    const y = cellY(index);
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  return found ? { minX, minY, maxX, maxY } : null;
+}
+
+export type ViewSize = { width: number; height: number };
+
+export function visibleRegion(viewport: Viewport, view: ViewSize, fitZoom = MIN_ZOOM, margin = 0): SelectionBounds {
+  const zoom = clampZoom(viewport.zoom, fitZoom);
+  return {
+    minX: Math.floor(viewport.x - view.width / (2 * zoom)) - margin,
+    maxX: Math.ceil(viewport.x + view.width / (2 * zoom)) + margin,
+    minY: Math.floor(viewport.y - view.height / (2 * zoom)) - margin,
+    maxY: Math.ceil(viewport.y + view.height / (2 * zoom)) + margin,
+  };
+}
+
+export function containsRegion(outer: SelectionBounds, inner: SelectionBounds) {
+  return inner.minX >= outer.minX && inner.maxX <= outer.maxX && inner.minY >= outer.minY && inner.maxY <= outer.maxY;
+}
+
+export function isRegionVisible(bounds: SelectionBounds, viewport: Viewport, view: ViewSize, fitZoom = MIN_ZOOM) {
+  return containsRegion(visibleRegion(viewport, view, fitZoom), bounds);
+}
+
+export function frameViewport(
+  bounds: SelectionBounds,
+  view: ViewSize,
+  current: Viewport,
+  options?: { padding?: number },
+): Viewport {
+  const padding = options?.padding ?? 2;
+  const width = bounds.maxX - bounds.minX + 1 + padding * 2;
+  const height = bounds.maxY - bounds.minY + 1 + padding * 2;
+  const needed = Math.min(view.width / width, view.height / height);
+  const zoom = clampZoom(Math.min(current.zoom, needed), fitZoomFor(view));
+  return clampViewport({ x: (bounds.minX + bounds.maxX + 1) / 2, y: (bounds.minY + bounds.maxY + 1) / 2, zoom }, view);
+}
+
+export function regionToScreen(bounds: SelectionBounds, viewport: Viewport, view: ViewSize) {
+  return {
+    left: (bounds.minX - viewport.x) * viewport.zoom + view.width / 2,
+    top: (bounds.minY - viewport.y) * viewport.zoom + view.height / 2,
+    width: (bounds.maxX - bounds.minX + 1) * viewport.zoom,
+    height: (bounds.maxY - bounds.minY + 1) * viewport.zoom,
+  };
 }

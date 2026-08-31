@@ -1,4 +1,4 @@
-type WebMcpTool = {
+export type WebMcpTool = {
   name: string;
   title?: string;
   description: string;
@@ -7,23 +7,18 @@ type WebMcpTool = {
     readOnlyHint?: boolean;
     untrustedContentHint?: boolean;
   };
-  execute: (
-    input: Record<string, unknown>,
-    options: { signal: AbortSignal },
-  ) => unknown | Promise<unknown>;
+  execute: (input: Record<string, unknown>, options: { signal: AbortSignal }) => unknown | Promise<unknown>;
 };
 
-type ModelContext = {
-  registerTool: (
-    tool: WebMcpTool,
-    options?: { signal?: AbortSignal },
-  ) => Promise<void>;
+export type ModelContext = {
+  registerTool: (tool: WebMcpTool, options?: { signal?: AbortSignal }) => Promise<void>;
 };
 
 declare global {
   interface Document {
     modelContext?: ModelContext;
   }
+  interface Navigator {
+    modelContext?: ModelContext;
+  }
 }
-
-export {};

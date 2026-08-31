@@ -35,7 +35,6 @@ async function contentBox() {
   return { left, top, width: right - left + 1, height: bottom - top + 1 };
 }
 
-/** The mascot trimmed, scaled to `fit` on its long side, centred in a square. */
 async function squareIcon(size, box, { background, margin = 0.04 }) {
   const inner = Math.round(size * (1 - margin * 2));
   const sprite = await sharp(SOURCE)
@@ -46,11 +45,13 @@ async function squareIcon(size, box, { background, margin = 0.04 }) {
   return sharp({
     create: { width: size, height: size, channels: 4, background },
   })
-    .composite([{
-      input: sprite,
-      left: Math.round((size - width) / 2),
-      top: Math.round((size - height) / 2),
-    }])
+    .composite([
+      {
+        input: sprite,
+        left: Math.round((size - width) / 2),
+        top: Math.round((size - height) / 2),
+      },
+    ])
     .png();
 }
 
@@ -87,8 +88,10 @@ async function socialCard(box) {
   const type = (y, content) =>
     `<text x="${textX}" y="${y}" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="25" fill="${MUTED}" letter-spacing="0.5">${content}</text>`;
 
-  const card = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" shape-rendering="crispEdges">` +
-    rect(0, 0, width, height, PAPER) + grid +
+  const card =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" shape-rendering="crispEdges">` +
+    rect(0, 0, width, height, PAPER) +
+    grid +
     rect(textX, 342, Math.round(wordWidth), 2, INK, ' opacity="0.16"') +
     `<g shape-rendering="geometricPrecision">` +
     logotype(textX, baseline, em, INK) +
@@ -96,17 +99,13 @@ async function socialCard(box) {
     type(418, "edit together, live, in the browser.") +
     `</g></svg>`;
 
-  const sprite = await sharp(SOURCE)
-    .extract(box)
-    .resize(spriteWidth, spriteHeight, { kernel: "lanczos3" })
-    .toBuffer();
+  const sprite = await sharp(SOURCE).extract(box).resize(spriteWidth, spriteHeight, { kernel: "lanczos3" }).toBuffer();
 
   return sharp(Buffer.from(card))
     .composite([{ input: sprite, left: lockupX, top: Math.round((height - spriteHeight) / 2) }])
     .png();
 }
 
-/** Wraps one or more PNGs in a multi-image .ico container. */
 function icoFromPngs(images) {
   const header = Buffer.alloc(6);
   header.writeUInt16LE(0, 0);
@@ -135,27 +134,22 @@ const box = await contentBox();
 
 const TRANSPARENT = { r: 0, g: 0, b: 0, alpha: 0 };
 
-// A detailed sprite needs the .ico to carry several sizes so each context picks
-// a rendition drawn for it instead of downscaling one.
 const ico = [];
 for (const size of [48, 32, 16]) {
   ico.push({ size, png: await (await squareIcon(size, box, { background: TRANSPARENT })).toBuffer() });
 }
 writeFileSync(join(PUBLIC, "favicon.ico"), icoFromPngs(ico));
 
-// The one icon that cannot be transparent: iOS composites a touch icon over
-// black, so it gets the app's paper rather than a hole.
 await (await squareIcon(180, box, { background: { r: 250, g: 250, b: 247, alpha: 1 }, margin: 0.06 }))
   .flatten({ background: PAPER })
   .removeAlpha()
   .toFile(join(PUBLIC, "apple-touch-icon.png"));
 
-await (await squareIcon(192, box, { background: TRANSPARENT, margin: 0.06 }))
-  .toFile(join(PUBLIC, "icon-192.png"));
+await (await squareIcon(192, box, { background: TRANSPARENT, margin: 0.06 })).toFile(join(PUBLIC, "icon-192.png"));
 
 await (await socialCard(box)).toFile(join(PUBLIC, "og.png"));
 
 console.log(
   `Wrote favicon.ico (48/32/16), apple-touch-icon.png, icon-192.png, og.png ` +
-  `from a ${box.width}x${box.height} crop of design/mascot.png`,
+    `from a ${box.width}x${box.height} crop of design/mascot.png`,
 );

@@ -1,35 +1,123 @@
 # MCPixels
 
-A small pixel editor that a person and an AI agent can edit on the same live page. The canvas is a fixed 1024 by 1024 grid centred on the origin, spanning -512 to 511 on both axes. Use Draw, Erase, and Fill to edit pixels; drag to stamp lines, outlined or filled rectangles, and outlined or filled ellipses; pick existing colors with the palette eyedropper; or Select to clear, copy, cut, paste, export, move, flip, and rotate rectangular selections. Draw and Erase run from 1 to 8 pixels wide: hold or right-click either tool in the dock — both carry the corner triangle that marks a tool with more behind it — for the size popover, or resize with [ and ] without leaving the canvas. Drag inside an active selection to move it; flip and rotate transform the selected pixels in place; a click with Select and no drag clears the selection instead of leaving a single pixel selected. Horizontal and vertical mirror modes reflect brush strokes, erasing, and shapes across the highlighted origin axes, and can be enabled together for four-way symmetry. Switch tools with B (Draw), E (Erase), G (Fill), L (Line), R (Rectangle), O (Ellipse), I (eyedropper), H (Pan), and M (Select). A color chosen from the picker or the eyedropper sits at the front of the fixed-size palette provisionally: draw with it and it is kept and persisted, pick a different custom color first and it is replaced, so unused picks never push the built-in colors out. Fill replaces contiguous color regions, including empty ones. PNG exports support a scale multiplier or exact output dimensions. Import brings an image in the other way — click Import, drop a file on the canvas, or paste one from the clipboard; upscaled pixel art has its pixel grid detected so each art pixel becomes one canvas pixel instead of a block of them, which works even when the art was rescaled by a fractional factor that blended the cell edges or left part of a cell at the border (a 347 by 379px sprite comes in as its real 32 by 35, a 590 by 576px one as 98 by 96); one cell size is fitted across both axes, so an import never comes in stretched, and art that holds no readable grid comes in at full size rather than squashed; transparent pixels stay empty, and the result drops into an active selection or at the center of the view as a single undoable step. When an agent paints, erases, moves the view, or clears the canvas, it says so in a stack of notices that drops from under the header status and fades out, up to five at a time on desktop and three on mobile; your own edits stay out of it, so the feed reads as what the agent did. The canvas is saved in your browser as you work, run-length encoded so an ordinary drawing costs a few kilobytes; if a canvas ever grows too detailed for the browser to store, a Not saved warning appears in the header rather than the save failing silently. Undo and Redo are available as buttons and with standard keyboard shortcuts. Zoom runs from a whole-canvas overview, which is as far out as the view will go, up to 64 pixels per cell; the pixel grid appears once cells are at least 8 pixels wide. Right-drag, middle-drag, Space-drag, or use Pan to move. Pan also supports two-finger pinch zoom on touch screens.
+A 1024×1024 pixel-art canvas that a person and an AI agent edit together, live, on the same page.
+
+The editor is an ordinary pixel editor in any browser — draw, shapes, fill, selections, mirroring, import, PNG export, undo. In a WebMCP browser it also hands an agent **six site tools** covering everything but image import, so the agent is a real participant rather than a pixel pipe. No backend: the tools are registered by the page itself via `document.modelContext.registerTool`.
+
+Built for [OpenAI's WebMCP Challenge](https://webmcp.devpost.com/). Live at **[mcpixels.app](https://mcpixels.app/)**.
 
 ## Run locally
 
+Requires Node 24+ — `npm test` runs `.ts` files directly, which needs unflagged native type stripping (Node 23.6 or later).
+
 ```bash
 npm install
-npm run dev
-npm test
+npm run dev      # vite dev server
+npm test         # pure logic, node:test, no test dependency installed
+npm run build    # tsc --noEmit && vite build
+npm run lint     # Biome lint checks
+npm run format   # format source and config files
+npm run check    # format/lint gate, tests, typecheck and production build
 ```
 
-`npm test` runs the pure canvas logic in `src/pixels.ts` through Node's built-in test runner; no test dependency is installed.
+`npm test` covers the canvas primitives (`src/pixels.ts`), the agent wire format (`src/agent/encode.ts`), and the six tools driven against a stand-in editor (`src/tools.test.ts`).
 
-The app works as a normal pixel editor in every modern browser. In a WebMCP-compatible browser it also registers five site tools:
+To exercise the agent side:
 
-- `get_sprite`
-- `paint_pixels`
-- `erase_pixels`
-- `set_canvas_view`
-- `clear_sprite`
+- **ChatGPT** — open the site in the ChatGPT desktop app's built-in browser, then check **Site tools** in the address bar.
+- **Chrome 146+** — enable `chrome://flags/#enable-webmcp-testing`, then from the console: `navigator.modelContext.getTools()` and `executeTool("draw_pixel_art", { … })`.
 
-Editor shortcuts follow desktop conventions: use Ctrl/Cmd+Z to undo, Ctrl+Y or Cmd+Shift+Z to redo, Ctrl/Cmd+C, X, and V to copy, cut, and paste a pixel selection, Ctrl/Cmd+A to select the whole canvas, Delete or Backspace to clear the selected pixels, and Escape to dismiss a selection. Copying or cutting also puts the selection on the system clipboard as a PNG, so it can be pasted into another app; pasting it back into MCPixels restores the pixels themselves rather than reimporting the image. Arrow keys nudge a selection by one pixel or pan the canvas when no selection is active. On desktop, scroll or right-drag to pan, pinch or Ctrl-scroll to zoom, and right-click or two-finger tap for canvas actions. On mobile, two fingers always pan and pinch-zoom regardless of the active tool.
+## The six tools
 
-For ChatGPT, open the app in the ChatGPT desktop app's built-in browser and inspect **Site tools** in the address bar. For Chrome testing, enable `chrome://flags/#enable-webmcp-testing` in a compatible Chrome build.
+The whole surface costs **~1,260 tokens** of context, because every tool's description and schema sits in the model's context on every turn. That budget is the reason for most of the design below.
+
+| # | tool | what it does |
+| --- | --- | --- |
+| 1 | `draw_pixel_art` | The only tool you send pixel data to. Takes a picture (`rows` of palette characters), a command string (`ops` — line, rect, ellipse, flood fill, recolour, pixels), or both, plus optional `mirror`. One call is one undo step, unless it changed nothing. |
+| 2 | `read_canvas` | Reads any region back in exactly the format `draw_pixel_art` accepts, with an `exact` flag saying whether the rows are faithful. A read costs at most ~2,600 tokens whatever is on the canvas. |
+| 3 | `selection` | Rearranges art already on the canvas: `duplicate` (with `times`, for a row in one call), `move`, `erase`, `flip-left-right`, `flip-top-bottom`, `rotate`, `copy`/`cut`/`paste`, `set`/`dismiss`. Takes an explicit region, falling back to the person's selection when you omit one. No pixel data travels through it. |
+| 4 | `edit` | `undo`, `redo` (up to 20 steps at once), or `clear-canvas`. The agent and the person share one edit timeline. |
+| 5 | `view` | Frames a region on screen. Draws nothing — edits bring themselves into view on their own, so this is only for navigation the person asked for. |
+| 6 | `export_pixel_art` | Saves a region as a PNG to the person's downloads at a chosen scale. |
+
+### Why pictures instead of coordinates
+
+Sending a 32×32 sprite as `[{x, y, color}, …]` costs about 22,500 tokens. As rows of palette characters it costs about 400 — and the agent can see what it is writing:
+
+```js
+draw_pixel_art({
+  origin: [-4, -3],
+  palette: { k: "#161616", r: "#ff5c35", w: "#f5f1e8" },
+  rows: ["..kkkk..", ".krrrrk.", "kr.ww.rk", "krrrrrrk", ".kkkkkk."],
+})
+```
+
+`.` leaves a cell alone, `-` erases it — stamping never scrubs the art underneath. Larger geometry goes through `ops` instead — `c #2d7ff9;rect -20 -20 20 20 f;bucket 0 0` — and both can be combined in one call. Because `read_canvas` returns the same shape, read → edit the rows → draw back is a closed loop with no reformatting.
+
+The tools also nudge the agent toward the editor's own capabilities rather than spelling out every pixel: `draw_pixel_art` may return a single `hint` when a call had a substantially cheaper form (a mirrored half, or one filled rect). It is advice only — every call always does exactly what was asked.
+
+### Watching the agent work
+
+Agent actions appear in a notice feed under the header; the person's own edits stay out of it. When an agent draws off screen the view eases across to frame it and the area flashes, so its work is not invisible — skipped while you are mid-gesture or have the import or export panel open, and switched off entirely with **Follow agent edits** in the dock's ••• menu.
+
+## Layout
+
+```
+src/
+  pixels.ts        pure canvas logic: history, geometry, fill, RLE persistence
+  agent/           encode.ts (wire format) · tools.ts (the six) · controller.ts
+  editor/          state provider, hooks — pointer machine, keyboard, panels
+  render/          canvas painter and PNG rasterizer, no React
+  components/      presentational UI · icons.tsx (generated)
+```
+
+## Icons
+
+Most of the chrome uses hand-drawn stroke icons, written inline where they are
+used. Seven come from [Material Symbols][ms] Sharp, weight 400, optical size 24,
+inlined as paths in `src/components/icons.tsx`:
+
+- **the shape picker and the button that opens it** — line, rectangle, ellipse
+  and their filled cuts, where the icon *is* the shape and drawing it by hand
+  only invites inconsistency
+- **the pan tool** — `open_with`, four-way arrows. Deliberately not a hand:
+  every hand in this pack is built from a hooked L-shaped palm plus three
+  detached bars for fingers, and at 23px that reads as a comb. `pan_tool`,
+  `pan_tool_alt`, `back_hand`, `front_hand` and `hand_gesture` all share the
+  construction, and the filled cuts collapse into a blob.
+
+Nothing is loaded at runtime: no icon font, no network request, no flash of
+missing glyphs. Those glyphs are filled paths rather than strokes, so they carry
+an `icon` class that the stylesheet uses to exempt them from the surrounding
+stroke treatment — keep the class if you add more.
+
+`icons.tsx` is generated. To add or swap one, edit the `ICONS` map in
+`scripts/fetch-ui-icons.mjs` and re-run it:
+
+```bash
+node scripts/fetch-ui-icons.mjs
+```
+
+It refuses any glyph that does not arrive as a single path on the pack's
+standard `0 -960 960 960` viewBox, so a bad name fails loudly rather than
+shipping a blank button. The outline and filled cuts of the rectangle and
+ellipse share a bounding box exactly, so a shape does not jump size when you
+switch its style.
+
+One glyph is turned in CSS rather than substituted: the pack ships no diagonal
+rule, so `horizontal_rule` is rotated -45° into the shape picker's line. It is
+symmetric about the turn, so the rotation is invisible.
+
+Material Symbols is Apache-2.0 licensed by Google.
+
+[ms]: https://github.com/google/material-design-icons
 
 ## Deploy
 
-The production site is a static Cloudflare Pages deployment. No Pages Functions or usage-billed backend services are enabled.
+Static Cloudflare Pages. No Pages Functions, no usage-billed services.
 
 ```bash
 npm run deploy
 ```
 
-The command typechecks and builds the app before deploying `dist` to the `mcpixels` Pages project from the `main` branch.
+Typechecks, builds, and uploads `dist` to the `mcpixels` Pages project on `main`.

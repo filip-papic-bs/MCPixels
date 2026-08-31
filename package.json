@@ -7,6 +7,10 @@
     "dev": "vite",
     "test": "node --test src/*.test.ts",
     "build": "tsc --noEmit && vite build",
+    "lint": "biome lint .",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "check": "biome check . && npm test && npm run build",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler pages deploy dist --project-name mcpixels --branch main"
   },
@@ -15,6 +19,7 @@
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.11",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
     "@vitejs/plugin-react": "^6.1.1",

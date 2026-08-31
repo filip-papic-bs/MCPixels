@@ -32,6 +32,16 @@ button {
   color: inherit;
 }
 
+.dock-button svg.icon,
+.dock-popover button svg.icon {
+  fill: currentColor;
+  stroke: none;
+}
+
+.icon--diagonal {
+  transform: rotate(-45deg);
+}
+
 .app-shell,
 .editor {
   position: relative;
@@ -155,6 +165,37 @@ button {
 .agent-status--unavailable span,
 .agent-status--error span {
   background: #ef5938;
+}
+
+.agent-status--button {
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.agent-status--button:hover,
+.agent-status--button:focus-visible {
+  border-color: rgba(239, 89, 56, 0.7);
+  color: #30322f;
+}
+
+/* Pulses while an agent tool is running, so co-editing is visible on screen. */
+.agent-status--working span {
+  animation: agent-pulse 900ms ease-in-out infinite;
+}
+
+@keyframes agent-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.5);
+    opacity: 0.55;
+  }
 }
 
 .editor {
@@ -312,7 +353,9 @@ button {
   z-index: 2;
   border: 2px solid #ef5938;
   background: rgba(239, 89, 56, 0.08);
-  box-shadow: inset 0 0 0 1px rgba(250, 250, 247, 0.8), 0 0 0 1px rgba(26, 27, 25, 0.38);
+  box-shadow:
+    inset 0 0 0 1px rgba(250, 250, 247, 0.8),
+    0 0 0 1px rgba(26, 27, 25, 0.38);
   pointer-events: none;
 }
 
@@ -583,11 +626,6 @@ button {
   background: #f7f7f3;
 }
 
-.export-panel footer button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
 .canvas-meta {
   position: absolute;
   right: 24px;
@@ -719,7 +757,7 @@ button {
 
 .bottom-controls {
   position: absolute;
-  z-index: 4;
+  z-index: 5;
   bottom: max(14px, env(safe-area-inset-bottom));
   left: 50%;
   width: max-content;
@@ -742,7 +780,9 @@ button {
   border-radius: 13px;
   color: #383a36;
   background: rgba(250, 250, 247, 0.96);
-  box-shadow: 0 6px 22px rgba(30, 32, 29, 0.14), 0 1px 2px rgba(30, 32, 29, 0.1);
+  box-shadow:
+    0 6px 22px rgba(30, 32, 29, 0.14),
+    0 1px 2px rgba(30, 32, 29, 0.1);
   backdrop-filter: blur(14px);
   transform: none;
   scrollbar-width: none;
@@ -921,11 +961,6 @@ button {
   stroke-width: 1.6;
 }
 
-.dock-popover .filled-shape-icon rect,
-.dock-popover .filled-shape-icon ellipse {
-  fill: currentColor;
-}
-
 .dock-popover .popover-shapes button,
 .dock-popover .popover-sizes button,
 .dock-popover .popover-grid--icon-actions button {
@@ -958,6 +993,11 @@ button {
   cursor: not-allowed;
 }
 
+.export-panel footer button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .dock-popover .danger-option,
 .canvas-context-menu .danger-option {
   color: #b44127;
@@ -976,6 +1016,37 @@ button {
   pointer-events: none;
 }
 
+/* Only the notices that jump somewhere are clickable. */
+.notice--jump {
+  font-family: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.notice--jump:hover,
+.notice--jump:focus-visible {
+  border-color: rgba(239, 89, 56, 0.6);
+}
+
+.notice--draw {
+  border-left: 2px solid #ef5938;
+}
+.notice--view {
+  border-left: 2px solid #2d7ff9;
+}
+.notice--select {
+  border-left: 2px solid #7557d3;
+}
+.notice--export {
+  border-left: 2px solid #45b86b;
+}
+.notice--history {
+  border-left: 2px solid #ffbd2e;
+}
+.notice--error {
+  border-left: 2px solid #e54888;
+}
+
 .notice {
   max-width: 100%;
   margin: 0;
@@ -990,7 +1061,18 @@ button {
   box-shadow: 0 6px 18px rgba(30, 32, 29, 0.12);
   backdrop-filter: blur(10px);
   animation: notice-in 200ms ease-out both;
-  transition: opacity 300ms ease, transform 300ms ease;
+  transition:
+    opacity 300ms ease,
+    transform 300ms ease;
+}
+
+.notice-count {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  color: #ef5938;
+  font-variant-numeric: tabular-nums;
+  background: rgba(239, 89, 56, 0.12);
 }
 
 .notice--leaving {
@@ -1306,5 +1388,329 @@ button {
     bottom: auto;
     left: var(--selection-float-left);
     transform: none;
+  }
+}
+
+.export-panel.agent-help {
+  width: min(540px, 100%);
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border-color: rgba(48, 50, 47, 0.28);
+  color: #30322f;
+  background: rgba(250, 250, 247, 0.98);
+  box-shadow: 8px 8px 0 rgba(23, 25, 22, 0.13);
+}
+
+.agent-help .export-header {
+  align-items: center;
+}
+
+.agent-help .export-header > div > span,
+.agent-help-section-heading > span {
+  color: #777a74;
+  font-size: 0.56rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.agent-help .export-header button {
+  width: auto;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid rgba(48, 50, 47, 0.24);
+  border-radius: 7px;
+  color: #4f524c;
+  font-size: 0.6rem;
+  background: #f1f0ea;
+}
+
+.agent-demo {
+  overflow: hidden;
+  border: 1px solid rgba(48, 50, 47, 0.24);
+  border-radius: 10px;
+  background: #ecebe5;
+}
+
+.agent-demo-bar {
+  display: flex;
+  height: 30px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  border-bottom: 1px solid rgba(48, 50, 47, 0.18);
+  color: #6a6d66;
+  font-size: 0.54rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.agent-demo-bar strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #4a4d47;
+  font-weight: 500;
+}
+
+.agent-demo-bar i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #45b86b;
+}
+
+.agent-demo-canvas {
+  position: relative;
+  padding: 12px;
+}
+
+.agent-demo-grid {
+  display: grid;
+  overflow: hidden;
+  grid-template-columns: repeat(20, minmax(0, 1fr));
+  gap: 1px;
+  padding: 1px;
+  border: 1px solid #d2d1ca;
+  background: #d8d7d0;
+}
+
+.agent-demo-grid > span {
+  aspect-ratio: 1;
+  background: #fafaf7;
+}
+
+.agent-demo-grid .agent-demo-pixel {
+  opacity: 0;
+  animation: agent-demo-paint 5.2s steps(1, end) var(--paint-delay) infinite;
+}
+
+.agent-demo-grid .agent-demo-pixel--k {
+  background: #161616;
+}
+.agent-demo-grid .agent-demo-pixel--o {
+  background: #ff5c35;
+}
+.agent-demo-grid .agent-demo-pixel--b {
+  background: #2d7ff9;
+}
+.agent-demo-grid .agent-demo-pixel--c {
+  background: #f5f1e8;
+}
+
+.agent-demo-cursor {
+  position: absolute;
+  top: 23%;
+  left: 19%;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 5px;
+  border-radius: 5px;
+  color: #fff;
+  font-size: 0.48rem;
+  line-height: 1;
+  background: #30322f;
+  box-shadow: 0 2px 5px rgba(23, 25, 22, 0.22);
+  animation: agent-demo-cursor 5.2s ease-in-out infinite;
+}
+
+.agent-demo-cursor i {
+  width: 5px;
+  height: 5px;
+  background: #ffbd2e;
+}
+
+@keyframes agent-demo-paint {
+  0%,
+  4% {
+    opacity: 0;
+  }
+  5%,
+  78% {
+    opacity: 1;
+  }
+  88%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes agent-demo-cursor {
+  0%,
+  10% {
+    top: 23%;
+    left: 19%;
+  }
+  38% {
+    top: 66%;
+    left: 36%;
+  }
+  54% {
+    top: 25%;
+    left: 60%;
+  }
+  82% {
+    top: 67%;
+    left: 79%;
+  }
+  92%,
+  100% {
+    top: 23%;
+    left: 19%;
+    opacity: 0;
+  }
+}
+
+.agent-help-lead {
+  margin: 0;
+  color: #545751;
+  font-size: 0.68rem;
+  line-height: 1.5;
+}
+
+.agent-help-section,
+.agent-prompt {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-help-section-heading {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.agent-prompt {
+  padding: 11px;
+  border: 1px solid rgba(239, 89, 56, 0.28);
+  border-left: 3px solid #ef5938;
+  border-radius: 8px;
+  background: #fff5f1;
+}
+
+.agent-prompt p {
+  margin: 0;
+  color: #3f423d;
+  font-size: 0.66rem;
+  line-height: 1.55;
+}
+
+.agent-prompt button {
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid rgba(48, 50, 47, 0.24);
+  border-radius: 6px;
+  color: #3f423d;
+  font-size: 0.56rem;
+  background: #fafaf7;
+  cursor: pointer;
+}
+
+.agent-help-tools,
+.agent-help-steps {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  gap: 6px;
+  list-style: none;
+}
+
+.agent-help-tools {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.agent-help-tools li {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid rgba(48, 50, 47, 0.16);
+  border-radius: 7px;
+  background: #f3f2ed;
+  font-size: 0.66rem;
+}
+
+.agent-help-tools code,
+.agent-help-steps code {
+  padding: 2px 6px;
+  border-radius: 5px;
+  color: #30322f;
+  font-size: 0.64rem;
+  background: rgba(48, 50, 47, 0.08);
+}
+
+.agent-help-tools code {
+  width: max-content;
+}
+
+.agent-help-tools span {
+  color: #6a6d66;
+}
+
+.agent-help-steps li {
+  color: #545751;
+  font-size: 0.66rem;
+  line-height: 1.55;
+}
+
+.dock-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(48, 50, 47, 0.16);
+  color: #3f423d;
+  font-size: 0.62rem;
+  cursor: pointer;
+}
+
+.dock-toggle input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: #ef5938;
+  cursor: pointer;
+}
+
+/* Marks the area an agent just changed. Mirrors .selection-outline's placement. */
+.edit-flash {
+  position: absolute;
+  z-index: 2;
+  border: 2px solid #ef5938;
+  background: rgba(239, 89, 56, 0.16);
+  animation: edit-flash 700ms ease-out forwards;
+  pointer-events: none;
+}
+
+@keyframes edit-flash {
+  from {
+    opacity: 0.55;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-demo-grid .agent-demo-pixel {
+    opacity: 1;
+    animation: none;
+  }
+
+  .agent-demo-cursor {
+    display: none;
+  }
+
+  .edit-flash {
+    animation-duration: 300ms;
+    animation-timing-function: steps(1, end);
+  }
+}
+
+@media (max-width: 520px) {
+  .agent-help-tools {
+    grid-template-columns: 1fr;
   }
 }
