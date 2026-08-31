@@ -1,7 +1,5 @@
-@import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@600;700;800&display=swap");
-
 :root {
-  font-family: "DM Mono", monospace;
+  font-family: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #1a1b19;
   background: #fafaf7;
   font-synthesis: none;
@@ -79,7 +77,7 @@ button {
 
 .wordmark {
   color: #1a1b19;
-  font-family: "Syne", sans-serif;
+  font-family: "Syne", "Avenir Next", "Segoe UI", system-ui, sans-serif;
   font-size: 1.2rem;
   font-weight: 600;
   letter-spacing: -0.05em;
@@ -163,14 +161,6 @@ button {
   position: absolute;
   inset: 0;
 }
-
-legend {
-  margin: 0 0 8px;
-  font-size: 0.59rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
 .toolbar {
   position: absolute;
   z-index: 3;
@@ -190,18 +180,6 @@ legend {
   box-shadow: 8px 8px 0 rgba(23, 25, 22, 0.12);
   backdrop-filter: blur(10px);
 }
-
-fieldset {
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-
-legend {
-  color: #aeb1aa;
-}
-
 .palette {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
@@ -266,159 +244,6 @@ legend {
   opacity: 0;
   cursor: pointer;
 }
-
-.segmented-control,
-.history-buttons,
-.zoom-buttons {
-  display: flex;
-  height: 34px;
-}
-
-.segment,
-.history-buttons button,
-.zoom-buttons button,
-.import-button,
-.clear-button {
-  display: grid;
-  min-width: 0;
-  place-items: center;
-  padding: 0 8px;
-  border: 1px solid #5c5f59;
-  border-right: 0;
-  border-radius: 0;
-  color: #c6c9c1;
-  font-size: 0.6rem;
-  background: transparent;
-}
-
-.segment {
-  flex: 1;
-  padding-right: 4px;
-  padding-left: 4px;
-}
-
-.shape-buttons .shape-style:first-of-type {
-  margin-left: 5px;
-  border-left: 1px solid #5c5f59;
-}
-
-.history-buttons button {
-  flex: 1;
-}
-
-.segment:last-child,
-.history-buttons button:last-child,
-.zoom-buttons button:last-child {
-  border-right: 1px solid #5c5f59;
-}
-
-.segment,
-.history-buttons button,
-.zoom-buttons button,
-.import-button,
-.clear-button {
-  cursor: pointer;
-}
-
-.segment--active {
-  color: #1a1b19;
-  background: #f7f7f3;
-}
-
-.history-buttons button:disabled {
-  color: #6f726c;
-  cursor: not-allowed;
-}
-
-.history-buttons svg,
-.zoom-buttons svg {
-  width: 15px;
-  height: 15px;
-  fill: none;
-  stroke: currentColor;
-  stroke-linecap: square;
-  stroke-linejoin: miter;
-  stroke-width: 1.3;
-}
-
-.selection-nudge-control {
-  display: none;
-}
-
-.selection-nudge-buttons {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-}
-
-.selection-nudge-buttons button {
-  display: grid;
-  height: 36px;
-  place-items: center;
-  padding: 0;
-  border: 1px solid #5c5f59;
-  border-right: 0;
-  border-radius: 0;
-  color: #f7f7f3;
-  background: transparent;
-  cursor: pointer;
-}
-
-.selection-nudge-buttons button:last-child {
-  border-right: 1px solid #5c5f59;
-}
-
-.selection-nudge-buttons svg {
-  width: 16px;
-  height: 16px;
-  fill: none;
-  stroke: currentColor;
-  stroke-linecap: square;
-  stroke-linejoin: miter;
-  stroke-width: 1.3;
-}
-
-.zoom-buttons button {
-  width: 34px;
-  flex: 0 0 34px;
-  padding: 0;
-  color: #f7f7f3;
-  font-size: 0.9rem;
-}
-
-.zoom-buttons .home-button {
-  width: auto;
-  min-width: 62px;
-  flex: 1;
-  border-left: 0;
-  border-right: 1px solid #5c5f59;
-  font-size: 0.57rem;
-}
-
-.file-actions {
-  display: flex;
-  gap: 7px;
-}
-
-.import-button,
-.clear-button {
-  width: 100%;
-  height: 34px;
-  border-right: 1px solid #5c5f59;
-}
-
-.file-actions .import-button,
-.file-actions .clear-button {
-  flex: 1;
-}
-
-.import-button {
-  color: #c6c9c1;
-}
-
-.clear-button {
-  color: #ff876f;
-}
-
 .canvas-column {
   position: absolute;
   z-index: 1;
@@ -581,7 +406,7 @@ legend {
 
 .export-panel h2 {
   margin: 3px 0 0;
-  font-family: "Syne", sans-serif;
+  font-family: "Syne", "Avenir Next", "Segoe UI", system-ui, sans-serif;
   font-size: 1.15rem;
   letter-spacing: -0.03em;
 }
@@ -825,38 +650,6 @@ legend {
     padding: 10px;
     transform: translateX(-50%);
   }
-
-  .toolbar legend {
-    display: none;
-  }
-
-  .color-control,
-  .mode-control,
-  .shape-control {
-    grid-column: 1 / -1;
-  }
-
-  .symmetry-control {
-    grid-column: 1 / 7;
-  }
-
-  .history-control {
-    grid-column: 7 / -1;
-  }
-
-  .selection-nudge-control {
-    display: block;
-    grid-column: 1 / -1;
-  }
-
-  .zoom-control {
-    grid-column: 1 / 7;
-  }
-
-  .file-actions {
-    grid-column: 7 / -1;
-  }
-
   .palette {
     grid-template-columns: repeat(10, 1fr);
     gap: 5px;
@@ -868,17 +661,6 @@ legend {
     height: 26px;
     aspect-ratio: auto;
   }
-
-  .segmented-control,
-  .history-buttons,
-  .zoom-buttons,
-  .file-actions,
-  .import-button,
-  .clear-button {
-    height: 30px;
-    align-self: end;
-  }
-
   .canvas-meta {
     display: none;
   }
@@ -893,11 +675,7 @@ legend {
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .swatch,
-  .segment,
-  .zoom-buttons button,
-  .import-button,
-  .clear-button {
+  .swatch {
     transition: transform 120ms ease;
   }
 
@@ -1109,31 +887,18 @@ legend {
   background: #f7e5df;
 }
 
-.popover-grid,
-.popover-row {
+.popover-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
 }
 
-.popover-grid + .popover-grid,
-.popover-grid + .popover-row,
-.popover-row + .popover-grid {
+.popover-grid + .popover-grid {
   margin-top: 7px;
 }
-
-.popover-grid--three {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
 .popover-grid--icon-actions {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
-
-.popover-row {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-}
-
 .dock-popover button {
   min-width: 0;
   min-height: 34px;
@@ -1161,8 +926,8 @@ legend {
   fill: currentColor;
 }
 
-.dock-popover .popover-grid--three button,
 .dock-popover .popover-shapes button,
+
 .dock-popover .popover-grid--icon-actions button {
   height: 46px;
   padding: 0;
@@ -1196,16 +961,6 @@ legend {
 .dock-popover .danger-option {
   color: #b44127;
 }
-
-.dock-button--danger {
-  color: #b94a31;
-}
-
-.dock-button--danger:hover {
-  color: #a33721;
-  background: #f8e5df;
-}
-
 .utility-dock {
   position: absolute;
   z-index: 4;
@@ -1245,13 +1000,6 @@ legend {
   margin: 0 3px;
   background: rgba(48, 50, 47, 0.16);
 }
-
-.utility-dock .zoom-readout {
-  width: 53px;
-  flex-basis: 53px;
-  font-size: 0.58rem;
-}
-
 .selection-actions,
 .selection-actions--with-paste {
   position: absolute;
@@ -1401,11 +1149,6 @@ legend {
   .dock-popover--more {
     width: 174px;
   }
-
-  .popover-row {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
   .selection-actions,
   .selection-actions--with-paste {
     bottom: max(72px, calc(env(safe-area-inset-bottom) + 66px));
