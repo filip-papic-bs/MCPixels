@@ -927,7 +927,7 @@ button {
 }
 
 .dock-popover .popover-shapes button,
-
+.dock-popover .popover-sizes button,
 .dock-popover .popover-grid--icon-actions button {
   height: 46px;
   padding: 0;
@@ -958,8 +958,121 @@ button {
   cursor: not-allowed;
 }
 
-.dock-popover .danger-option {
+.dock-popover .danger-option,
+.canvas-context-menu .danger-option {
   color: #b44127;
+}
+
+.notice-stack {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% - 8px);
+  right: 0;
+  display: flex;
+  width: min(340px, 76vw);
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+  pointer-events: none;
+}
+
+.notice {
+  max-width: 100%;
+  margin: 0;
+  padding: 7px 11px;
+  border: 1px solid rgba(48, 50, 47, 0.18);
+  border-radius: 9px;
+  color: #43463f;
+  font-size: 0.62rem;
+  line-height: 1.25;
+  text-align: right;
+  background: rgba(250, 250, 247, 0.94);
+  box-shadow: 0 6px 18px rgba(30, 32, 29, 0.12);
+  backdrop-filter: blur(10px);
+  animation: notice-in 200ms ease-out both;
+  transition: opacity 300ms ease, transform 300ms ease;
+}
+
+.notice--leaving {
+  opacity: 0;
+  transform: translateY(-5px);
+}
+
+@keyframes notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(-7px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notice {
+    animation: none;
+    transition: opacity 120ms linear;
+  }
+
+  .notice--leaving {
+    transform: none;
+  }
+}
+
+.brush-dock-button {
+  position: relative;
+}
+
+.brush-dock-button::after {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 5px;
+  height: 5px;
+  background: currentColor;
+  opacity: 0.42;
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+  pointer-events: none;
+  content: "";
+}
+
+.brush-dock-button:hover::after,
+.brush-dock-button.dock-button--active::after {
+  opacity: 0.8;
+}
+
+.brush-dock-button em {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  font-size: 0.5rem;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  opacity: 0.75;
+  pointer-events: none;
+}
+
+.popover-sizes {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 5px;
+  place-items: center;
+}
+
+.dock-popover .popover-sizes button {
+  display: grid;
+  width: 100%;
+  place-items: center;
+}
+
+.popover-sizes .popover-option span {
+  display: block;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.dock-button {
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 .utility-dock {
   position: absolute;

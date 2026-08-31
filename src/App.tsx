@@ -2,164 +2,86 @@ import { useEffect, useRef, useState } from "react";
 import type {
   CSSProperties,
   KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
   ReactElement,
 } from "react";
-
-const EMPTY_PIXEL = "transparent";
-const EMPTY_CELL = 0;
-const CANVAS_SIZE = 1024;
-const CANVAS_MIN = -CANVAS_SIZE / 2;
-const CANVAS_MAX = CANVAS_SIZE / 2 - 1;
-const MIN_ZOOM = 0.1;
-const GRID_LINE_ZOOM = 8;
-const MAX_ZOOM = 64;
-const DEFAULT_ZOOM = 22;
-const DRAG_THRESHOLD = 5;
-const STORAGE_KEY = "mcpixels.editor.v1";
-const STORAGE_VERSION = 2;
-const MAX_STORED_BYTES = 1_200_000;
-const DEFAULT_EXPORT_SCALE = 8;
-const MAX_EXPORT_SCALE = 64;
-const MAX_EXPORT_DIMENSION = 4096;
-const MAX_IMPORT_SOURCE_DIMENSION = 4096;
-const MAX_IMPORT_DIMENSION = 256;
-const IMPORT_ALPHA_THRESHOLD = 128;
-const IMPORT_MATCH_TOLERANCE = 16;
-const MIN_IMPORT_CELL_SIZE = 2;
-const IMPORT_EDGE_CELL_BIAS = 0.15;
-const HISTORY_LIMIT = 100;
-const HISTORY_CELL_LIMIT = 2_000_000;
-const MAX_SHAPE_PIXELS = 50_000;
-const MAX_CUSTOM_COLORS = 8;
-const COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
-const PALETTE = [
-  "#161616",
-  "#f5f1e8",
-  "#ff5c35",
-  "#ffbd2e",
-  "#45b86b",
-  "#2d7ff9",
-  "#7557d3",
-  "#e54888",
-];
-
-type PixelChange = { x: number; y: number; color: string };
-type PixelAction =
-  | { type: "paint"; changes: PixelChange[]; historyGroup?: number }
-  | { type: "clear-area"; bounds: SelectionBounds }
-  | {
-      type: "move";
-      from: SelectionBounds;
-      changes: PixelChange[];
-      selectionBefore: SelectionBounds;
-      selectionAfter: SelectionBounds;
-    }
-  | { type: "clear" }
-  | { type: "undo" }
-  | { type: "redo" };
-type PixelPatch = {
-  indices: number[];
-  before: number[];
-  after: number[];
-  historyGroup: number | null;
-  selectionBefore?: SelectionBounds;
-  selectionAfter?: SelectionBounds;
-};
-type HistoryState = { version: number; undoDepth: number; redoDepth: number };
-type Viewport = { x: number; y: number; zoom: number };
-type SelectionBounds = { minX: number; minY: number; maxX: number; maxY: number };
-type CopiedSelection = { pixels: PixelChange[]; width: number; height: number; origin: ScreenPoint };
-type MovingSelection = { originalBounds: SelectionBounds; captured: CopiedSelection };
-type ScreenPoint = { x: number; y: number };
-type ShapeTool = "line" | "rectangle" | "ellipse";
-type ColorTool = "paint" | "fill" | ShapeTool;
-type Tool = ColorTool | "erase" | "picker" | "pan" | "select";
-type ShapeStyle = "outline" | "filled";
-type Symmetry = { horizontal: boolean; vertical: boolean };
-type ExportMode = "scale" | "dimensions";
-type ImportGrid = {
-  columns: number;
-  rows: number;
-  originX: number;
-  originY: number;
-  pitch: number;
-};
-type ImportSource = ImportGrid & {
-  name: string;
-  data: Uint8ClampedArray;
-  width: number;
-  height: number;
-};
-type FillResult = {
-  changes: PixelChange[];
-  reason?: "same-color" | "off-canvas";
-};
-type PersistedEditorState = {
-  cells: Uint32Array;
-  viewport: Viewport;
-  selectedColor: string;
-  customColors: string[];
-};
-type PointerState =
-  | {
-      kind: "draw";
-      pointerId: number;
-      lastPixel: ScreenPoint;
-      historyGroup: number;
-      color: string;
-      symmetry: Symmetry;
-      pendingChanges?: PixelChange[];
-    }
-  | {
-      kind: "shape";
-      pointerId: number;
-      anchor: ScreenPoint;
-      current: ScreenPoint;
-      tool: ShapeTool;
-      color: string;
-      style: ShapeStyle;
-      symmetry: Symmetry;
-    }
-  | { kind: "select"; pointerId: number; anchor: { x: number; y: number } }
-  | { kind: "move-selection"; pointerId: number; anchor: { x: number; y: number } }
-  | { kind: "tap-tool"; pointerId: number; tool: "fill" | "picker"; clientX: number; clientY: number }
-  | { kind: "pinch"; lastCenter: ScreenPoint; lastDistance: number }
-  | {
-      kind: "pan";
-      pointerId: number;
-      startX: number;
-      startY: number;
-      lastX: number;
-      lastY: number;
-      hasDragged: boolean;
-      button: number;
-    }
-  | null;
-
-const isOnCanvas = (x: number, y: number) =>
-  x >= CANVAS_MIN && x <= CANVAS_MAX && y >= CANVAS_MIN && y <= CANVAS_MAX;
-
-const cellIndex = (x: number, y: number) => (y - CANVAS_MIN) * CANVAS_SIZE + (x - CANVAS_MIN);
-
-const cellX = (index: number) => (index % CANVAS_SIZE) + CANVAS_MIN;
-
-const cellY = (index: number) => Math.floor(index / CANVAS_SIZE) + CANVAS_MIN;
-
-const cellFromColor = (color: string) => (0xff000000 | parseInt(color.slice(1), 16)) >>> 0;
-
-const colorFromCell = (cell: number) => `#${((cell & 0xffffff) | 0x1000000).toString(16).slice(1)}`;
-
-const clampToCanvas = (value: number) => Math.max(CANVAS_MIN, Math.min(CANVAS_MAX, value));
-
-function clampSelectionToCanvas(bounds: SelectionBounds): SelectionBounds {
-  return {
-    minX: clampToCanvas(bounds.minX),
-    minY: clampToCanvas(bounds.minY),
-    maxX: clampToCanvas(bounds.maxX),
-    maxY: clampToCanvas(bounds.maxY),
-  };
-}
+import {
+  EMPTY_PIXEL,
+  EMPTY_CELL,
+  CANVAS_SIZE,
+  CANVAS_MIN,
+  CANVAS_MAX,
+  MIN_ZOOM,
+  GRID_LINE_ZOOM,
+  MAX_ZOOM,
+  DEFAULT_ZOOM,
+  DRAG_THRESHOLD,
+  STORAGE_KEY,
+  STORAGE_VERSION,
+  DEFAULT_EXPORT_SCALE,
+  MAX_EXPORT_SCALE,
+  MAX_EXPORT_DIMENSION,
+  MAX_IMPORT_DIMENSION,
+  MAX_SHAPE_PIXELS,
+  MAX_CUSTOM_COLORS,
+  COLOR_PATTERN,
+  PALETTE,
+  isOnCanvas,
+  cellIndex,
+  cellFromColor,
+  colorFromCell,
+  clampSelectionToCanvas,
+  isColorTool,
+  isShapeTool,
+  supportsSymmetry,
+  createPixelStore,
+  applyPixelAction,
+  readPaintedPixels,
+  countPaintedCells,
+  isCoordinate,
+  clampZoom,
+  fitZoomFor,
+  clampViewport,
+  selectionBounds,
+  floodFill,
+  getPinchMetrics,
+  encodeCells,
+  loadPersistedState,
+  pixelsOnLine,
+  applySymmetry,
+  brushStamp,
+  stepBrushSize,
+  BRUSH_SIZES,
+  pixelsInShape,
+  rasterizeImportSource,
+  fitImportDimensions,
+  readImageSize,
+  readImportSource,
+  importOriginFor,
+  findImageFile,
+  carriesFiles,
+} from "./pixels";
+import type {
+  PixelChange,
+  PixelAction,
+  HistoryState,
+  Viewport,
+  SelectionBounds,
+  CopiedSelection,
+  MovingSelection,
+  ScreenPoint,
+  ShapeTool,
+  ColorTool,
+  Tool,
+  ShapeStyle,
+  Symmetry,
+  ExportMode,
+  ImportSource,
+  FillResult,
+  PointerState,
+  PixelStore,
+} from "./pixels";
 
 const TOOL_SHORTCUTS: Record<string, Tool> = {
   b: "paint",
@@ -230,808 +152,13 @@ function isShapeOptionActive(option: ShapeOption, tool: Tool, style: ShapeStyle)
   return option.style === null || option.style === style;
 }
 
-function isColorTool(tool: Tool): tool is ColorTool {
-  return tool === "paint" || tool === "fill" || tool === "line" || tool === "rectangle" || tool === "ellipse";
-}
-
-function isShapeTool(tool: Tool): tool is ShapeTool {
-  return tool === "line" || tool === "rectangle" || tool === "ellipse";
-}
-
-function supportsSymmetry(tool: Tool) {
-  return tool === "paint" || tool === "erase" || tool === "fill" || isShapeTool(tool);
-}
-
-type PixelStore = {
-  cells: Uint32Array;
-  undoStack: PixelPatch[];
-  redoStack: PixelPatch[];
-  cellCount: number;
-};
-
-function createPixelStore(cells: Uint32Array): PixelStore {
-  return { cells, undoStack: [], redoStack: [], cellCount: 0 };
-}
-
-function recordCell(patch: PixelPatch, index: number, before: number, after: number) {
-  patch.indices.push(index);
-  patch.before.push(before);
-  patch.after.push(after);
-}
-
-function trimHistory(store: PixelStore) {
-  while (store.undoStack.length > HISTORY_LIMIT || (store.cellCount > HISTORY_CELL_LIMIT && store.undoStack.length > 1)) {
-    const dropped = store.undoStack.shift();
-    if (!dropped) return;
-    store.cellCount -= dropped.indices.length;
-  }
-}
-
-function writeCell(store: PixelStore, patch: PixelPatch, x: number, y: number, value: number) {
-  if (!isOnCanvas(x, y)) return;
-  const index = cellIndex(x, y);
-  const before = store.cells[index];
-  if (before === value) return;
-  store.cells[index] = value;
-  recordCell(patch, index, before, value);
-}
-
-function clearArea(store: PixelStore, patch: PixelPatch, bounds: SelectionBounds) {
-  const area = clampSelectionToCanvas(bounds);
-  for (let y = area.minY; y <= area.maxY; y += 1) {
-    for (let x = area.minX; x <= area.maxX; x += 1) {
-      writeCell(store, patch, x, y, EMPTY_CELL);
-    }
-  }
-}
-
-function applyPixelChanges(store: PixelStore, patch: PixelPatch, changes: PixelChange[]) {
-  for (const { x, y, color } of changes) {
-    writeCell(store, patch, x, y, color === EMPTY_PIXEL ? EMPTY_CELL : cellFromColor(color));
-  }
-}
-
-function applyPixelAction(store: PixelStore, action: PixelAction) {
-  if (action.type === "undo") {
-    const patch = store.undoStack.pop();
-    if (!patch) return false;
-    for (let entry = patch.indices.length - 1; entry >= 0; entry -= 1) {
-      store.cells[patch.indices[entry]] = patch.before[entry];
-    }
-    store.redoStack.push(patch);
-    return true;
-  }
-
-  if (action.type === "redo") {
-    const patch = store.redoStack.pop();
-    if (!patch) return false;
-    for (let entry = 0; entry < patch.indices.length; entry += 1) {
-      store.cells[patch.indices[entry]] = patch.after[entry];
-    }
-    store.undoStack.push(patch);
-    return true;
-  }
-
-  const historyGroup = action.type === "paint" ? action.historyGroup ?? null : null;
-  const open = store.undoStack.at(-1);
-  const continues = historyGroup !== null && open !== undefined && open.historyGroup === historyGroup;
-  const patch: PixelPatch = continues && open ? open : { indices: [], before: [], after: [], historyGroup };
-  const started = patch.indices.length;
-
-  if (action.type === "clear") {
-    for (let index = 0; index < store.cells.length; index += 1) {
-      const before = store.cells[index];
-      if (before === EMPTY_CELL) continue;
-      store.cells[index] = EMPTY_CELL;
-      recordCell(patch, index, before, EMPTY_CELL);
-    }
-  } else if (action.type === "clear-area") {
-    clearArea(store, patch, action.bounds);
-  } else if (action.type === "move") {
-    clearArea(store, patch, action.from);
-    applyPixelChanges(store, patch, action.changes);
-    patch.selectionBefore = action.selectionBefore;
-    patch.selectionAfter = action.selectionAfter;
-  } else {
-    applyPixelChanges(store, patch, action.changes);
-  }
-
-  const written = patch.indices.length - started;
-  if (written === 0) return false;
-  for (const dropped of store.redoStack) store.cellCount -= dropped.indices.length;
-  store.redoStack.length = 0;
-  store.cellCount += written;
-  if (!continues) store.undoStack.push(patch);
-  trimHistory(store);
-  return true;
-}
-
-function readPaintedPixels(cells: Uint32Array) {
-  const painted: { x: number; y: number; color: string }[] = [];
-  for (let index = 0; index < cells.length; index += 1) {
-    if (cells[index] === EMPTY_CELL) continue;
-    painted.push({ x: cellX(index), y: cellY(index), color: colorFromCell(cells[index]) });
-  }
-  return painted;
-}
-
-function countPaintedCells(cells: Uint32Array, bounds?: SelectionBounds) {
-  let painted = 0;
-  if (!bounds) {
-    for (let index = 0; index < cells.length; index += 1) if (cells[index] !== EMPTY_CELL) painted += 1;
-    return painted;
-  }
-  const area = clampSelectionToCanvas(bounds);
-  for (let y = area.minY; y <= area.maxY; y += 1) {
-    for (let x = area.minX; x <= area.maxX; x += 1) {
-      if (cells[cellIndex(x, y)] !== EMPTY_CELL) painted += 1;
-    }
-  }
-  return painted;
-}
-
-function isCoordinate(value: unknown): value is number {
-  return Number.isSafeInteger(value) && Number(value) >= CANVAS_MIN && Number(value) <= CANVAS_MAX;
-}
-
-function clampZoom(zoom: number, minZoom = MIN_ZOOM) {
-  return Math.min(MAX_ZOOM, Math.max(minZoom, zoom));
-}
-
-function fitZoomFor(view: { width: number; height: number }) {
-  return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.min(view.width, view.height) / CANVAS_SIZE));
-}
-
-function clampViewport(viewport: Viewport, view?: { width: number; height: number }): Viewport {
-  const zoom = clampZoom(viewport.zoom, view ? fitZoomFor(view) : MIN_ZOOM);
-  const axis = (value: number, extent: number) => {
-    if (extent > 0 && CANVAS_SIZE * zoom <= extent) return 0;
-    return Math.max(CANVAS_MIN, Math.min(CANVAS_MAX + 1, value));
-  };
-  return {
-    zoom,
-    x: axis(viewport.x, view ? view.width : 0),
-    y: axis(viewport.y, view ? view.height : 0),
-  };
-}
-
-function selectionBounds(from: { x: number; y: number }, to: { x: number; y: number }): SelectionBounds {
-  return {
-    minX: Math.min(from.x, to.x),
-    minY: Math.min(from.y, to.y),
-    maxX: Math.max(from.x, to.x),
-    maxY: Math.max(from.y, to.y),
-  };
-}
-
-function floodFill(cells: Uint32Array, start: ScreenPoint, color: string): FillResult {
-  if (!isOnCanvas(start.x, start.y)) return { changes: [], reason: "off-canvas" };
-  const target = cells[cellIndex(start.x, start.y)];
-  const replacement = cellFromColor(color);
-  if (target === replacement) return { changes: [], reason: "same-color" };
-
-  const queue = [cellIndex(start.x, start.y)];
-  const visited = new Uint8Array(cells.length);
-  visited[queue[0]] = 1;
-  const changes: PixelChange[] = [];
-  let queueIndex = 0;
-
-  while (queueIndex < queue.length) {
-    const index = queue[queueIndex];
-    queueIndex += 1;
-    const x = cellX(index);
-    const y = cellY(index);
-    changes.push({ x, y, color });
-
-    const neighbors = [
-      { x: x - 1, y },
-      { x: x + 1, y },
-      { x, y: y - 1 },
-      { x, y: y + 1 },
-    ];
-    for (const neighbor of neighbors) {
-      if (!isOnCanvas(neighbor.x, neighbor.y)) continue;
-      const neighborIndex = cellIndex(neighbor.x, neighbor.y);
-      if (visited[neighborIndex] || cells[neighborIndex] !== target) continue;
-      visited[neighborIndex] = 1;
-      queue.push(neighborIndex);
-    }
-  }
-
-  return { changes };
-}
-
-function getPinchMetrics(points: Map<number, ScreenPoint>) {
-  const [first, second] = Array.from(points.values());
-  if (!first || !second) return null;
-  return {
-    center: { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 },
-    distance: Math.max(1, Math.hypot(second.x - first.x, second.y - first.y)),
-  };
-}
-
-function readStoredColors(value: unknown, limit: number) {
-  if (!Array.isArray(value)) return [];
-  const colors: string[] = [];
-  for (const entry of value) {
-    if (typeof entry !== "string" || !COLOR_PATTERN.test(entry)) continue;
-    const color = entry.toLowerCase();
-    if (!colors.includes(color)) colors.push(color);
-    if (colors.length === limit) break;
-  }
-  return colors;
-}
-
-function writeVarint(bytes: number[], value: number) {
-  let remaining = value;
-  while (remaining >= 0x80) {
-    bytes.push((remaining & 0x7f) | 0x80);
-    remaining >>>= 7;
-  }
-  bytes.push(remaining);
-}
-
-function readVarint(bytes: Uint8Array, cursor: { at: number }) {
-  let value = 0;
-  let shift = 0;
-  while (cursor.at < bytes.length) {
-    const byte = bytes[cursor.at];
-    cursor.at += 1;
-    value += (byte & 0x7f) * 2 ** shift;
-    if ((byte & 0x80) === 0) return value;
-    shift += 7;
-    if (shift > 35) return null;
-  }
-  return null;
-}
-
-function bytesToBase64(bytes: Uint8Array) {
-  let binary = "";
-  for (let at = 0; at < bytes.length; at += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
-  }
-  return btoa(binary);
-}
-
-function base64ToBytes(text: string) {
-  const binary = atob(text);
-  const bytes = new Uint8Array(binary.length);
-  for (let at = 0; at < binary.length; at += 1) bytes[at] = binary.charCodeAt(at);
-  return bytes;
-}
-
-function encodeCells(cells: Uint32Array) {
-  const palette: string[] = [];
-  const indexes = new Map<number, number>();
-  const bytes: number[] = [];
-  let runCell = cells[0];
-  let runLength = 0;
-
-  const flush = () => {
-    if (runLength === 0) return true;
-    let index = 0;
-    if (runCell !== EMPTY_CELL) {
-      const known = indexes.get(runCell);
-      if (known === undefined) {
-        palette.push(colorFromCell(runCell));
-        index = palette.length;
-        indexes.set(runCell, index);
-      } else {
-        index = known;
-      }
-    }
-    writeVarint(bytes, index);
-    writeVarint(bytes, runLength);
-    return bytes.length <= MAX_STORED_BYTES;
-  };
-
-  for (let at = 0; at < cells.length; at += 1) {
-    if (cells[at] === runCell) {
-      runLength += 1;
-      continue;
-    }
-    if (!flush()) return null;
-    runCell = cells[at];
-    runLength = 1;
-  }
-  if (!flush()) return null;
-  return { palette, runs: bytesToBase64(Uint8Array.from(bytes)) };
-}
-
-function decodeCells(palette: unknown, runs: unknown) {
-  if (!Array.isArray(palette) || typeof runs !== "string") return null;
-  const colors = palette.map((color) =>
-    typeof color === "string" && COLOR_PATTERN.test(color) ? cellFromColor(color.toLowerCase()) : EMPTY_CELL,
-  );
-  let bytes: Uint8Array;
-  try {
-    bytes = base64ToBytes(runs);
-  } catch {
-    return null;
-  }
-  const cells = new Uint32Array(CANVAS_SIZE * CANVAS_SIZE);
-  const cursor = { at: 0 };
-  let filled = 0;
-
-  while (cursor.at < bytes.length) {
-    const index = readVarint(bytes, cursor);
-    const length = readVarint(bytes, cursor);
-    if (index === null || length === null || index > colors.length) return null;
-    if (filled + length > cells.length) return null;
-    if (index > 0) cells.fill(colors[index - 1], filled, filled + length);
-    filled += length;
-  }
-  return filled === cells.length ? cells : null;
-}
-
-function loadPersistedState(): PersistedEditorState {
-  const fallback: PersistedEditorState = {
-    cells: new Uint32Array(CANVAS_SIZE * CANVAS_SIZE),
-    viewport: { x: 0, y: 0, zoom: DEFAULT_ZOOM },
-    selectedColor: PALETTE[0],
-    customColors: [],
-  };
-
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return fallback;
-    const saved = JSON.parse(raw) as Record<string, unknown>;
-    let cells: Uint32Array | null = null;
-
-    if (saved.version === STORAGE_VERSION && saved.canvas === CANVAS_SIZE) {
-      cells = decodeCells(saved.palette, saved.runs);
-    } else if (saved.version === 1 && Array.isArray(saved.pixels)) {
-      cells = new Uint32Array(CANVAS_SIZE * CANVAS_SIZE);
-      for (const entry of saved.pixels) {
-        if (!Array.isArray(entry) || entry.length !== 3) continue;
-        const [x, y, color] = entry as unknown[];
-        if (isCoordinate(x) && isCoordinate(y) && typeof color === "string" && COLOR_PATTERN.test(color)) {
-          cells[cellIndex(x, y)] = cellFromColor(color.toLowerCase());
-        }
-      }
-    }
-    if (!cells) return fallback;
-
-    const savedViewport = saved.viewport as Record<string, unknown> | undefined;
-    const viewport =
-      savedViewport &&
-      typeof savedViewport.x === "number" &&
-      Number.isFinite(savedViewport.x) &&
-      typeof savedViewport.y === "number" &&
-      Number.isFinite(savedViewport.y) &&
-      typeof savedViewport.zoom === "number" &&
-      Number.isFinite(savedViewport.zoom)
-        ? clampViewport({ x: savedViewport.x, y: savedViewport.y, zoom: savedViewport.zoom })
-        : fallback.viewport;
-    const selectedColor =
-      typeof saved.selectedColor === "string" && COLOR_PATTERN.test(saved.selectedColor)
-        ? saved.selectedColor.toLowerCase()
-        : fallback.selectedColor;
-    const storedCustomColors = [
-      ...readStoredColors(saved.recentColors, MAX_CUSTOM_COLORS),
-      ...readStoredColors(saved.customColors, MAX_CUSTOM_COLORS),
-    ].filter((color) => !PALETTE.includes(color));
-    const customColors = [
-      ...(PALETTE.includes(selectedColor) ? [] : [selectedColor]),
-      ...storedCustomColors,
-    ].filter((color, index, colors) => colors.indexOf(color) === index).slice(0, MAX_CUSTOM_COLORS);
-
-    return { cells, viewport, selectedColor, customColors };
-  } catch (error) {
-    console.warn("Could not restore the saved MCPixels canvas", error);
-    return fallback;
-  }
-}
-
-function pixelsOnLine(from: { x: number; y: number }, to: { x: number; y: number }, color: string) {
-  const changes: PixelChange[] = [];
-  let x = from.x;
-  let y = from.y;
-  const deltaX = Math.abs(to.x - from.x);
-  const deltaY = Math.abs(to.y - from.y);
-  const stepX = from.x < to.x ? 1 : -1;
-  const stepY = from.y < to.y ? 1 : -1;
-  let error = deltaX - deltaY;
-
-  while (true) {
-    changes.push({ x, y, color });
-    if (x === to.x && y === to.y) return changes;
-    const doubledError = error * 2;
-    if (doubledError > -deltaY) {
-      error -= deltaY;
-      x += stepX;
-    }
-    if (doubledError < deltaX) {
-      error += deltaX;
-      y += stepY;
-    }
-  }
-}
-
-function applySymmetry(changes: PixelChange[], symmetry: Symmetry, limit = Number.POSITIVE_INFINITY) {
-  const mirrored = new Map<string, PixelChange>();
-  for (const change of changes) {
-    const xCoordinates = symmetry.vertical ? [change.x, -change.x - 1] : [change.x];
-    const yCoordinates = symmetry.horizontal ? [change.y, -change.y - 1] : [change.y];
-    for (const x of xCoordinates) {
-      for (const y of yCoordinates) {
-        mirrored.set(`${x},${y}`, { x, y, color: change.color });
-        if (mirrored.size > limit) return null;
-      }
-    }
-  }
-  return Array.from(mirrored.values());
-}
-
-function pixelsInShape(
-  tool: ShapeTool,
-  from: ScreenPoint,
-  to: ScreenPoint,
-  style: ShapeStyle,
-  color: string,
-  symmetry: Symmetry,
-) {
-  if (tool === "line") {
-    const pixelCount = Math.max(Math.abs(to.x - from.x), Math.abs(to.y - from.y)) + 1;
-    if (!Number.isSafeInteger(pixelCount) || pixelCount > MAX_SHAPE_PIXELS) return null;
-    return applySymmetry(pixelsOnLine(from, to, color), symmetry, MAX_SHAPE_PIXELS);
-  }
-
-  const bounds = selectionBounds(from, to);
-  const width = bounds.maxX - bounds.minX + 1;
-  const height = bounds.maxY - bounds.minY + 1;
-  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)) return null;
-  const changes: PixelChange[] = [];
-
-  if (tool === "rectangle") {
-    const pixelCount = style === "filled"
-      ? width * height
-      : width === 1
-        ? height
-        : height === 1
-          ? width
-          : width * 2 + (height - 2) * 2;
-    if (pixelCount > MAX_SHAPE_PIXELS) return null;
-
-    if (style === "filled") {
-      for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
-        for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
-          changes.push({ x, y, color });
-        }
-      }
-    } else {
-      for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
-        changes.push({ x, y: bounds.minY, color });
-        if (bounds.maxY !== bounds.minY) changes.push({ x, y: bounds.maxY, color });
-      }
-      for (let y = bounds.minY + 1; y < bounds.maxY; y += 1) {
-        changes.push({ x: bounds.minX, y, color });
-        if (bounds.maxX !== bounds.minX) changes.push({ x: bounds.maxX, y, color });
-      }
-    }
-  } else {
-    if (width * height > MAX_SHAPE_PIXELS) return null;
-    const centerX = (bounds.minX + bounds.maxX + 1) / 2;
-    const centerY = (bounds.minY + bounds.maxY + 1) / 2;
-    const radiusX = width / 2;
-    const radiusY = height / 2;
-    const isInside = (x: number, y: number) => {
-      if (x < bounds.minX || x > bounds.maxX || y < bounds.minY || y > bounds.maxY) return false;
-      const normalizedX = (x + 0.5 - centerX) / radiusX;
-      const normalizedY = (y + 0.5 - centerY) / radiusY;
-      return normalizedX * normalizedX + normalizedY * normalizedY <= 1;
-    };
-
-    for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
-      for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
-        if (!isInside(x, y)) continue;
-        if (
-          style === "filled" ||
-          !isInside(x - 1, y) ||
-          !isInside(x + 1, y) ||
-          !isInside(x, y - 1) ||
-          !isInside(x, y + 1)
-        ) {
-          changes.push({ x, y, color });
-        }
-      }
-    }
-  }
-
-  return applySymmetry(changes, symmetry, MAX_SHAPE_PIXELS);
-}
-
-function sourcePixelDistance(data: Uint8ClampedArray, a: number, b: number) {
-  const alphaDistance = Math.abs(data[a + 3] - data[b + 3]);
-  if (data[a + 3] < IMPORT_ALPHA_THRESHOLD && data[b + 3] < IMPORT_ALPHA_THRESHOLD) return alphaDistance;
-  return Math.max(
-    alphaDistance,
-    Math.abs(data[a] - data[b]),
-    Math.abs(data[a + 1] - data[b + 1]),
-    Math.abs(data[a + 2] - data[b + 2]),
-  );
-}
-
-function lineBreaks(
-  data: Uint8ClampedArray,
-  size: number,
-  otherSize: number,
-  indexOf: (line: number, offset: number) => number,
-) {
-  const isBreak = new Uint8Array(size);
-  const energy = new Float64Array(size);
-  for (let line = 1; line < size; line += 1) {
-    let peak = 0;
-    let total = 0;
-    for (let offset = 0; offset < otherSize; offset += 1) {
-      const distance = sourcePixelDistance(data, indexOf(line - 1, offset), indexOf(line, offset));
-      if (distance > peak) peak = distance;
-      total += distance;
-    }
-    isBreak[line] = peak > IMPORT_MATCH_TOLERANCE ? 1 : 0;
-    energy[line] = total;
-  }
-  let drift = 0;
-  for (let offset = 0; offset < otherSize; offset += 1) {
-    drift = Math.max(drift, sourcePixelDistance(data, indexOf(0, offset), indexOf(size - 1, offset)));
-  }
-  return { isBreak, energy, drift };
-}
-
-function breakCenters(isBreak: Uint8Array, energy: Float64Array) {
-  const centers: number[] = [];
-  let widest = 0;
-  let start = -1;
-  for (let line = 0; line <= isBreak.length; line += 1) {
-    if (line < isBreak.length && isBreak[line]) {
-      if (start < 0) start = line;
-      continue;
-    }
-    if (start < 0) continue;
-    let weight = 0;
-    let weighted = 0;
-    for (let inner = start; inner < line; inner += 1) {
-      weight += energy[inner];
-      weighted += energy[inner] * inner;
-    }
-    centers.push(weight > 0 ? weighted / weight : start);
-    widest = Math.max(widest, line - start);
-    start = -1;
-  }
-  return { centers, widest };
-}
-
-function gridFit(centers: number[], pitch: number) {
-  let sines = 0;
-  let cosines = 0;
-  for (const center of centers) {
-    const angle = (Math.PI * 2 * center) / pitch;
-    sines += Math.sin(angle);
-    cosines += Math.cos(angle);
-  }
-  const phase = (Math.atan2(sines, cosines) * pitch) / (Math.PI * 2);
-  let worst = 0;
-  let total = 0;
-  for (const center of centers) {
-    const offset = center - phase;
-    const residual = Math.abs(offset - Math.round(offset / pitch) * pitch);
-    if (residual > worst) worst = residual;
-    total += residual;
-  }
-  return { phase, worst, mean: total / centers.length };
-}
-
-function fitPitch(centers: number[], count: number, pitch: number, phase: number) {
-  let indexTotal = 0;
-  let centerTotal = 0;
-  let squareTotal = 0;
-  let productTotal = 0;
-  for (let entry = 0; entry < count; entry += 1) {
-    const index = Math.round((centers[entry] - phase) / pitch);
-    indexTotal += index;
-    centerTotal += centers[entry];
-    squareTotal += index * index;
-    productTotal += index * centers[entry];
-  }
-  const spread = count * squareTotal - indexTotal * indexTotal;
-  if (spread === 0) return null;
-  const next = (count * productTotal - indexTotal * centerTotal) / spread;
-  if (!(next > 0)) return null;
-  return { pitch: next, phase: (centerTotal - next * indexTotal) / count };
-}
-
-function refinePitch(centers: number[], guess: number) {
-  let pitch = guess;
-  let phase = centers[0];
-  for (let count = Math.min(centers.length, 4); ; count = Math.min(centers.length, count * 2)) {
-    for (let pass = 0; pass < 3; pass += 1) {
-      const fit = fitPitch(centers, count, pitch, phase);
-      if (!fit) break;
-      const settled = Math.abs(fit.pitch - pitch) < 1e-6;
-      pitch = fit.pitch;
-      phase = fit.phase;
-      if (settled) break;
-    }
-    if (count >= centers.length) return pitch;
-  }
-}
-
-function pitchCandidates(centers: number[]) {
-  if (centers.length < 2) return [];
-  const gaps: number[] = [];
-  for (let index = 1; index < centers.length; index += 1) gaps.push(centers[index] - centers[index - 1]);
-  gaps.sort((a, b) => a - b);
-  const guesses = [gaps[0], gaps[Math.floor(gaps.length / 2)]];
-  return guesses
-    .filter((guess) => guess >= MIN_IMPORT_CELL_SIZE)
-    .map((guess) => refinePitch(centers, guess))
-    .filter((pitch) => pitch >= MIN_IMPORT_CELL_SIZE);
-}
-
-function axisAccepts(breaks: { centers: number[]; widest: number }, pitch: number) {
-  if (breaks.centers.length === 0) return { origin: 0 };
-  if (breaks.widest > pitch * 0.85) return null;
-  const fit = gridFit(breaks.centers, pitch);
-  if (fit.worst > Math.min(pitch * 0.25, Math.max(0.85, pitch * 0.08))) return null;
-  if (fit.mean > Math.min(pitch * 0.12, Math.max(0.35, pitch * 0.04))) return null;
-  return { origin: fit.phase };
-}
-
-function detectPixelGrid(data: Uint8ClampedArray, width: number, height: number): ImportGrid {
-  const fullSize = { columns: width, rows: height, originX: 0, originY: 0, pitch: 1 };
-  const columnLines = lineBreaks(data, width, height, (x, y) => (y * width + x) * 4);
-  const rowLines = lineBreaks(data, height, width, (y, x) => (y * width + x) * 4);
-  const columnBreaks = breakCenters(columnLines.isBreak, columnLines.energy);
-  const rowBreaks = breakCenters(rowLines.isBreak, rowLines.energy);
-
-  if (columnBreaks.centers.length === 0 && rowBreaks.centers.length === 0) {
-    const flat = columnLines.drift <= IMPORT_MATCH_TOLERANCE && rowLines.drift <= IMPORT_MATCH_TOLERANCE;
-    return flat ? { columns: 1, rows: 1, originX: 0, originY: 0, pitch: 1 } : fullSize;
-  }
-  if (columnBreaks.centers.length === 0 && columnLines.drift > IMPORT_MATCH_TOLERANCE) return fullSize;
-  if (rowBreaks.centers.length === 0 && rowLines.drift > IMPORT_MATCH_TOLERANCE) return fullSize;
-
-  const candidates = [...pitchCandidates(columnBreaks.centers), ...pitchCandidates(rowBreaks.centers)].sort(
-    (a, b) => b - a,
-  );
-  for (const pitch of candidates) {
-    const columnFit = axisAccepts(columnBreaks, pitch);
-    const rowFit = axisAccepts(rowBreaks, pitch);
-    if (!columnFit || !rowFit) continue;
-    const columns = Math.max(1, Math.round((width - columnFit.origin) / pitch + IMPORT_EDGE_CELL_BIAS));
-    const rows = Math.max(1, Math.round((height - rowFit.origin) / pitch + IMPORT_EDGE_CELL_BIAS));
-    if (columns >= width && rows >= height) break;
-    return { columns, rows, originX: columnFit.origin, originY: rowFit.origin, pitch };
-  }
-  return fullSize;
-}
-
-function rasterizeImportSource(source: ImportSource, width: number, height: number) {
-  const detected = width === source.columns && height === source.rows;
-  const cellWidth = detected ? source.pitch : source.width / width;
-  const cellHeight = detected ? source.pitch : source.height / height;
-  const originX = detected ? source.originX : 0;
-  const originY = detected ? source.originY : 0;
-  const insetX = Math.min(cellWidth / 4, 2);
-  const insetY = Math.min(cellHeight / 4, 2);
-  const changes: PixelChange[] = [];
-  const counts = new Map<number, number>();
-
-  for (let y = 0; y < height; y += 1) {
-    const topEdge = originY + y * cellHeight;
-    const top = Math.max(0, Math.min(source.height - 1, Math.floor(topEdge + insetY)));
-    const bottom = Math.max(top, Math.min(source.height - 1, Math.ceil(topEdge + cellHeight - insetY) - 1));
-    for (let x = 0; x < width; x += 1) {
-      const leftEdge = originX + x * cellWidth;
-      const left = Math.max(0, Math.min(source.width - 1, Math.floor(leftEdge + insetX)));
-      const right = Math.max(left, Math.min(source.width - 1, Math.ceil(leftEdge + cellWidth - insetX) - 1));
-
-      counts.clear();
-      let bestColor = -1;
-      let bestCount = 0;
-      for (let sourceY = top; sourceY <= bottom; sourceY += 1) {
-        for (let sourceX = left; sourceX <= right; sourceX += 1) {
-          const index = (sourceY * source.width + sourceX) * 4;
-          const color =
-            source.data[index + 3] < IMPORT_ALPHA_THRESHOLD
-              ? -1
-              : (source.data[index] << 16) | (source.data[index + 1] << 8) | source.data[index + 2];
-          const count = (counts.get(color) ?? 0) + 1;
-          counts.set(color, count);
-          if (count > bestCount) {
-            bestCount = count;
-            bestColor = color;
-          }
-        }
-      }
-      if (bestColor < 0) continue;
-      changes.push({ x, y, color: `#${(bestColor | 0x1000000).toString(16).slice(1)}` });
-    }
-  }
-  return changes;
-}
-
-function fitImportDimensions(width: number, height: number) {
-  const factor = Math.min(1, MAX_IMPORT_DIMENSION / width, MAX_IMPORT_DIMENSION / height);
-  if (factor >= 1) return { width, height };
-  return {
-    width: Math.max(1, Math.floor(width * factor)),
-    height: Math.max(1, Math.floor(height * factor)),
-  };
-}
-
-async function decodeImageFile(file: File) {
-  if (typeof createImageBitmap === "function") {
-    const bitmap = await createImageBitmap(file);
-    return { image: bitmap as CanvasImageSource, width: bitmap.width, height: bitmap.height, release: () => bitmap.close() };
-  }
-  const url = URL.createObjectURL(file);
-  try {
-    const image = new Image();
-    image.src = url;
-    await image.decode();
-    return {
-      image: image as CanvasImageSource,
-      width: image.naturalWidth,
-      height: image.naturalHeight,
-      release: () => URL.revokeObjectURL(url),
-    };
-  } catch (error) {
-    URL.revokeObjectURL(url);
-    throw error;
-  }
-}
-
-async function readImportSource(file: File): Promise<ImportSource> {
-  if (file.type && !file.type.startsWith("image/")) throw new Error("That file is not an image.");
-  const decoded = await decodeImageFile(file);
-  try {
-    const { width, height } = decoded;
-    if (!width || !height) throw new Error("That image has no pixels to import.");
-    if (width > MAX_IMPORT_SOURCE_DIMENSION || height > MAX_IMPORT_SOURCE_DIMENSION) {
-      throw new Error(`Images must be at most ${MAX_IMPORT_SOURCE_DIMENSION}px per side.`);
-    }
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const context = canvas.getContext("2d", { willReadFrequently: true });
-    if (!context) throw new Error("Could not create the import canvas");
-    context.imageSmoothingEnabled = false;
-    context.drawImage(decoded.image, 0, 0);
-    const { data } = context.getImageData(0, 0, width, height);
-    return { name: file.name || "pasted image", data, width, height, ...detectPixelGrid(data, width, height) };
-  } finally {
-    decoded.release();
-  }
-}
-
-function importOriginFor(selection: SelectionBounds | null, viewport: Viewport, width: number, height: number) {
-  const clamp = (value: number, size: number) =>
-    Math.max(CANVAS_MIN, Math.min(CANVAS_MAX - size + 1, value));
-  return {
-    x: clamp(selection ? selection.minX : Math.round(viewport.x) - Math.floor(width / 2), width),
-    y: clamp(selection ? selection.minY : Math.round(viewport.y) - Math.floor(height / 2), height),
-  };
-}
-
-function findImageFile(files: FileList | null | undefined, items?: DataTransferItemList | null) {
-  for (const file of Array.from(files ?? [])) {
-    if (file.type.startsWith("image/")) return file;
-  }
-  for (const item of Array.from(items ?? [])) {
-    if (item.kind !== "file" || !item.type.startsWith("image/")) continue;
-    const file = item.getAsFile();
-    if (file) return file;
-  }
-  return null;
-}
-
-function carriesFiles(transfer: DataTransfer | null) {
-  return Array.from(transfer?.types ?? []).includes("Files");
-}
-
-type DockPanel = "color" | "shape" | "more" | null;
+type DockPanel = "color" | "shape" | "size" | "more" | null;
 type CanvasMenu = { x: number; y: number } | null;
+type Notice = { id: number; text: string; leaving: boolean };
+
+const NOTICE_HOLD = 4_200;
+const NOTICE_FADE = 320;
+const HOLD_TO_OPEN = 420;
 
 function App() {
   const [initialState] = useState(loadPersistedState);
@@ -1051,14 +178,22 @@ function App() {
   };
   const [selectedColor, setSelectedColor] = useState(initialState.selectedColor);
   const [customColors, setCustomColors] = useState(initialState.customColors);
+  const [pendingColor, setPendingColor] = useState<string | null>(
+    PALETTE.includes(initialState.selectedColor) || initialState.customColors.includes(initialState.selectedColor)
+      ? null
+      : initialState.selectedColor,
+  );
   const [tool, setTool] = useState<Tool>("paint");
   const [shapeStyle, setShapeStyle] = useState<ShapeStyle>("outline");
+  const [brushSize, setBrushSize] = useState(1);
   const [symmetry, setSymmetry] = useState<Symmetry>({ horizontal: false, vertical: false });
   const [shapePreview, setShapePreview] = useState<PixelChange[]>([]);
   const [touchPreview, setTouchPreview] = useState<PixelChange[]>([]);
   const [viewport, setViewport] = useState<Viewport>(initialState.viewport);
   const [canvasSize, setCanvasSize] = useState({ width: 1, height: 1 });
   const [activity, setActivity] = useState("Canvas ready. Pick a color and draw.");
+  const [notices, setNotices] = useState<Notice[]>([]);
+  const [noticeLimit, setNoticeLimit] = useState(() => (window.matchMedia("(max-width: 720px)").matches ? 3 : 5));
   const [webMcpStatus, setWebMcpStatus] = useState<"checking" | "ready" | "unavailable" | "error">("checking");
   const [isPanning, setIsPanning] = useState(false);
   const [selection, setSelection] = useState<SelectionBounds | null>(null);
@@ -1101,9 +236,49 @@ function App() {
   const selectionBeforeTouchRef = useRef<SelectionBounds | null>(null);
   const rightDragEndedAtRef = useRef(0);
   const contextMenuOpenedAtRef = useRef(0);
+  const noticesRef = useRef<Notice[]>(notices);
+  const noticeLimitRef = useRef(noticeLimit);
+  const noticeTimersRef = useRef(new Map<number, { hide: number; drop: number }>());
+  const noticeIdRef = useRef(0);
+  const holdTimerRef = useRef<number | null>(null);
+  const heldOpenRef = useRef(false);
+  const selectionBeforeExportRef = useRef<SelectionBounds | null>(null);
+  const exportReplacedSelectionRef = useRef(false);
+  const clipboardPngRef = useRef<{ width: number; height: number } | null>(null);
   viewportRef.current = viewport;
   canvasSizeRef.current = canvasSize;
+  noticeLimitRef.current = noticeLimit;
   const fitZoom = fitZoomFor(canvasSize);
+
+  const applyNotices = (next: Notice[]) => {
+    noticesRef.current = next;
+    setNotices(next);
+  };
+
+  const holdNotice = (id: number) => {
+    const running = noticeTimersRef.current.get(id);
+    if (running) {
+      window.clearTimeout(running.hide);
+      window.clearTimeout(running.drop);
+    }
+    noticeTimersRef.current.set(id, {
+      hide: window.setTimeout(() => {
+        applyNotices(noticesRef.current.map((notice) => (notice.id === id ? { ...notice, leaving: true } : notice)));
+      }, NOTICE_HOLD),
+      drop: window.setTimeout(() => {
+        noticeTimersRef.current.delete(id);
+        applyNotices(noticesRef.current.filter((notice) => notice.id !== id));
+      }, NOTICE_HOLD + NOTICE_FADE),
+    });
+  };
+
+  const setAgentActivity = (text: string) => {
+    setActivity(text);
+    noticeIdRef.current += 1;
+    const id = noticeIdRef.current;
+    applyNotices([...noticesRef.current, { id, text, leaving: false }].slice(-noticeLimitRef.current));
+    holdNotice(id);
+  };
 
   useEffect(() => {
     const save = () => {
@@ -1144,6 +319,14 @@ function App() {
   }, [cells, customColors, history.version, selectedColor, viewport]);
 
   useEffect(() => {
+    const query = window.matchMedia("(max-width: 720px)");
+    const update = () => setNoticeLimit(query.matches ? 3 : 5);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -1168,10 +351,20 @@ function App() {
   useEffect(() => {
     if (!canvasMenu) return;
     const frame = window.requestAnimationFrame(() => {
-      canvasMenuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+      const menu = canvasMenuRef.current;
+      if (menu) {
+        const menuBounds = menu.getBoundingClientRect();
+        const maxLeft = Math.max(8, canvasSize.width - menuBounds.width - 8);
+        const maxTop = Math.max(8, canvasSize.height - menuBounds.height - 68);
+        if (canvasMenu.x > maxLeft || canvasMenu.y > maxTop) {
+          setCanvasMenu({ x: Math.min(canvasMenu.x, maxLeft), y: Math.min(canvasMenu.y, maxTop) });
+          return;
+        }
+      }
+      menu?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [canvasMenu]);
+  }, [canvasMenu, canvasSize]);
 
   useEffect(() => {
     const actions = selectionActionsRef.current;
@@ -1353,7 +546,7 @@ function App() {
     const pixel = getPixelAt(clientX, clientY);
     if (!pixel) return;
     const color = tool === "erase" ? EMPTY_PIXEL : selectedColor;
-    const changes = applySymmetry([{ ...pixel, color }], symmetry);
+    const changes = applySymmetry(brushStamp([pixel], brushSize, color), symmetry);
     if (!changes) return;
     historyGroupRef.current += 1;
     const historyGroup = historyGroupRef.current;
@@ -1363,6 +556,7 @@ function App() {
       lastPixel: pixel,
       historyGroup,
       color,
+      brush: brushSize,
       symmetry,
       pendingChanges: defer ? changes : undefined,
     };
@@ -1375,13 +569,17 @@ function App() {
       changes,
       historyGroup,
     });
+    keepUsedColor(color);
     setActivity(`You ${tool === "erase" ? "erased" : "painted"} pixel (${pixel.x}, ${pixel.y}).`);
   };
 
   const continueDrawingAt = (clientX: number, clientY: number, pointer: Extract<PointerState, { kind: "draw" }>) => {
     const pixel = getPixelAt(clientX, clientY);
     if (!pixel || (pixel.x === pointer.lastPixel.x && pixel.y === pointer.lastPixel.y)) return;
-    const changes = applySymmetry(pixelsOnLine(pointer.lastPixel, pixel, pointer.color), pointer.symmetry);
+    const changes = applySymmetry(
+      brushStamp(pixelsOnLine(pointer.lastPixel, pixel, pointer.color), pointer.brush, pointer.color),
+      pointer.symmetry,
+    );
     if (!changes) return;
     if (pointer.pendingChanges) {
       const pendingChanges = [...pointer.pendingChanges, ...changes];
@@ -1463,6 +661,7 @@ function App() {
     }
     if (changes.length > 0) {
       dispatch({ type: "paint", changes });
+      keepUsedColor(selectedColor);
       setActivity(`Filled ${changes.length} pixel${changes.length === 1 ? "" : "s"}${regions > 1 ? ` across ${regions} mirrored regions` : ""}.`);
       return;
     }
@@ -1473,9 +672,18 @@ function App() {
   const selectEditorColor = (value: string) => {
     const color = value.toLowerCase();
     setSelectedColor(color);
-    if (!PALETTE.includes(color)) {
-      setCustomColors((current) => [color, ...current.filter((entry) => entry !== color)].slice(0, MAX_CUSTOM_COLORS));
-    }
+    if (PALETTE.includes(color)) return;
+    setPendingColor(customColors.includes(color) ? null : color);
+  };
+
+  const keepUsedColor = (color: string) => {
+    if (color === EMPTY_PIXEL || PALETTE.includes(color)) return;
+    setPendingColor((current) => (current === color ? null : current));
+    setCustomColors((current) =>
+      current[0] === color
+        ? current
+        : [color, ...current.filter((entry) => entry !== color)].slice(0, MAX_CUSTOM_COLORS),
+    );
   };
 
   const pickColorAt = (clientX: number, clientY: number) => {
@@ -1519,10 +727,9 @@ function App() {
     const pixel = getPixelAt(clientX, clientY);
     if (pixel && isOnCanvas(pixel.x, pixel.y)) lastCanvasPointerRef.current = pixel;
     setDockPanel(null);
-    const menuHeight = selection ? 276 : 216;
     setCanvasMenu({
-      x: Math.max(8, Math.min(bounds.width - 190, clientX - bounds.left)),
-      y: Math.max(8, Math.min(bounds.height - menuHeight - 68, clientY - bounds.top)),
+      x: Math.max(8, clientX - bounds.left),
+      y: Math.max(8, clientY - bounds.top),
     });
     contextMenuOpenedAtRef.current = performance.now();
   };
@@ -1774,6 +981,7 @@ function App() {
       const pendingChanges = pointer.pendingChanges;
       if (pendingChanges) {
         dispatch({ type: "paint", changes: pendingChanges });
+        keepUsedColor(pointer.color);
         setTouchPreview([]);
         setActivity(`You ${pointer.color === EMPTY_PIXEL ? "erased" : "painted"} ${pendingChanges.length} pixel${pendingChanges.length === 1 ? "" : "s"}.`);
       }
@@ -1799,6 +1007,7 @@ function App() {
         setActivity(`Shape is too large. Stamps are limited to ${MAX_SHAPE_PIXELS} pixels.`);
       } else {
         dispatch({ type: "paint", changes });
+        keepUsedColor(pointer.color);
         const label = pointer.tool === "rectangle" ? "rectangle" : pointer.tool;
         setActivity(`Stamped a ${pointer.style === "filled" && pointer.tool !== "line" ? "filled " : ""}${label} with ${changes.length} pixel${changes.length === 1 ? "" : "s"}.`);
       }
@@ -1807,10 +1016,15 @@ function App() {
       const pixel = getPixelAt(event.clientX, event.clientY);
       if (pixel) {
         const bounds = clampSelectionToCanvas(selectionBounds(pointerRef.current.anchor, pixel));
-        setSelection(bounds);
         const width = bounds.maxX - bounds.minX + 1;
         const height = bounds.maxY - bounds.minY + 1;
-        setActivity(`Selected ${width} by ${height} pixels.`);
+        if (width === 1 && height === 1) {
+          setSelection(null);
+          setActivity("Selection dismissed.");
+        } else {
+          setSelection(bounds);
+          setActivity(`Selected ${width} by ${height} pixels.`);
+        }
       }
       selectionBeforeTouchRef.current = null;
     }
@@ -1917,12 +1131,6 @@ function App() {
   }, [canvasSize]);
 
   const handleCanvasKeyDown = (event: ReactKeyboardEvent<HTMLCanvasElement>) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      setSelection(null);
-      setActivity("Selection dismissed.");
-      return;
-    }
     if (event.key === "+" || event.key === "=") {
       event.preventDefault();
       zoomTo(viewport.zoom * 1.2);
@@ -2012,7 +1220,7 @@ function App() {
                 return { x, y, color: color.toLowerCase() };
               });
               dispatch({ type: "paint", changes });
-              setActivity(`Agent painted ${changes.length} pixel${changes.length === 1 ? "" : "s"}.`);
+              setAgentActivity(`Agent painted ${changes.length} pixel${changes.length === 1 ? "" : "s"}.`);
               return { success: true, painted: changes.length };
             },
           },
@@ -2044,7 +1252,7 @@ function App() {
                 return { x, y, color: EMPTY_PIXEL };
               });
               dispatch({ type: "paint", changes });
-              setActivity(`Agent erased ${changes.length} pixel${changes.length === 1 ? "" : "s"}.`);
+              setAgentActivity(`Agent erased ${changes.length} pixel${changes.length === 1 ? "" : "s"}.`);
               return { success: true, erased: changes.length };
             },
           },
@@ -2071,7 +1279,7 @@ function App() {
               }
               const next = clampViewport({ x, y, zoom }, canvasSizeRef.current);
               setViewport(next);
-              setActivity(`Agent centered the view at (${next.x}, ${next.y}).`);
+              setAgentActivity(`Agent centered the view at (${next.x}, ${next.y}).`);
               return { success: true, viewport: next };
             },
           },
@@ -2086,7 +1294,7 @@ function App() {
             execute: async () => {
               const cleared = countPaintedCells(store.cells);
               dispatch({ type: "clear" });
-              setActivity("Agent cleared the canvas.");
+              setAgentActivity("Agent cleared the canvas.");
               return { success: true, cleared };
             },
           },
@@ -2111,7 +1319,11 @@ function App() {
     unavailable: "Best in ChatGPT browser",
     error: "Tool registration failed",
   }[webMcpStatus];
-  const paletteColors = [...customColors, ...PALETTE].slice(0, PALETTE.length);
+  const paletteColors = [
+    ...(pendingColor && !customColors.includes(pendingColor) ? [pendingColor] : []),
+    ...customColors,
+    ...PALETTE,
+  ].slice(0, PALETTE.length);
   const symmetryEnabled = supportsSymmetry(tool);
 
   const selectionScreen = selection
@@ -2213,11 +1425,22 @@ function App() {
     return { pixels: copiedPixels, width, height, origin: { x: selection.minX, y: selection.minY } };
   };
 
+  const shareSelectionAsPng = (bounds: SelectionBounds, copied: CopiedSelection, verb: string) => {
+    const written = copySelectionToClipboard(bounds);
+    if (!written) return;
+    written.then(
+      () => setActivity(`${verb} ${copied.pixels.length} pixel${copied.pixels.length === 1 ? "" : "s"} and a ${copied.width} by ${copied.height} PNG to the clipboard.`),
+      (error: unknown) => console.warn("Could not put the selection on the system clipboard", error),
+    );
+  };
+
   const copySelection = () => {
+    if (!selection) return;
     const copied = captureSelection();
     if (!copied) return;
     setCopiedSelection(copied);
     setActivity(`Copied ${copied.pixels.length} pixel${copied.pixels.length === 1 ? "" : "s"} from a ${copied.width} by ${copied.height} selection.`);
+    shareSelectionAsPng(selection, copied, "Copied");
   };
 
   const cutSelection = () => {
@@ -2225,6 +1448,7 @@ function App() {
     const copied = captureSelection();
     if (!copied) return;
     setCopiedSelection(copied);
+    shareSelectionAsPng(selection, copied, "Cut");
     dispatch({ type: "clear-area", bounds: selection });
     setActivity(`Cut ${copied.pixels.length} pixel${copied.pixels.length === 1 ? "" : "s"} from a ${copied.width} by ${copied.height} selection.`);
   };
@@ -2354,7 +1578,13 @@ function App() {
         Math.floor(MAX_EXPORT_DIMENSION / height),
       ),
     );
-    if (bounds) setSelection(bounds);
+    if (bounds) {
+      selectionBeforeExportRef.current = selection;
+      exportReplacedSelectionRef.current = true;
+      setSelection(bounds);
+    } else {
+      exportReplacedSelectionRef.current = false;
+    }
     setExportMode("scale");
     setExportScale(scale);
     setExportDimensions({ width: width * scale, height: height * scale });
@@ -2369,10 +1599,17 @@ function App() {
     openExportPanel({ minX: CANVAS_MIN, minY: CANVAS_MIN, maxX: CANVAS_MAX, maxY: CANVAS_MAX });
   };
 
+  const restoreSelectionAfterExport = () => {
+    if (!exportReplacedSelectionRef.current) return;
+    exportReplacedSelectionRef.current = false;
+    setSelection(selectionBeforeExportRef.current);
+    selectionBeforeExportRef.current = null;
+  };
+
   const closeExportPanel = () => {
     setShowExport(false);
-    setSelection(null);
     setExportError("");
+    restoreSelectionAfterExport();
     setActivity("Export cancelled.");
   };
 
@@ -2416,34 +1653,66 @@ function App() {
     setExportDimensions({ width, height });
   };
 
+  const renderSelectionCanvas = (bounds: SelectionBounds) => {
+    const width = bounds.maxX - bounds.minX + 1;
+    const height = bounds.maxY - bounds.minY + 1;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+
+    const area = clampSelectionToCanvas(bounds);
+    const image = context.createImageData(width, height);
+    const painted = image.data;
+    for (let y = area.minY; y <= area.maxY; y += 1) {
+      const rowStart = (y - CANVAS_MIN) * CANVAS_SIZE - CANVAS_MIN;
+      const target = (y - bounds.minY) * width - bounds.minX;
+      for (let x = area.minX; x <= area.maxX; x += 1) {
+        const cell = store.cells[rowStart + x];
+        if (cell === EMPTY_CELL) continue;
+        const offset = (target + x) * 4;
+        painted[offset] = (cell >>> 16) & 255;
+        painted[offset + 1] = (cell >>> 8) & 255;
+        painted[offset + 2] = cell & 255;
+        painted[offset + 3] = 255;
+      }
+    }
+    context.putImageData(image, 0, 0);
+    return canvas;
+  };
+
+  const canvasToPng = (canvas: HTMLCanvasElement) =>
+    new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((result) => {
+        if (result) resolve(result);
+        else reject(new Error("Could not encode the PNG"));
+      }, "image/png");
+    });
+
+  const copySelectionToClipboard = (bounds: SelectionBounds) => {
+    if (typeof ClipboardItem !== "function" || typeof navigator.clipboard?.write !== "function") return null;
+    const canvas = renderSelectionCanvas(bounds);
+    if (!canvas) return null;
+    const png = canvasToPng(canvas).then((blob) => {
+      clipboardPngRef.current = { width: canvas.width, height: canvas.height };
+      return blob;
+    });
+    try {
+      return navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+    } catch (error) {
+      console.warn("This browser refused a PNG on the system clipboard", error);
+      return null;
+    }
+  };
+
   const exportSelectionAsPng = async () => {
     if (!selection || !selectionSize || exportSizeError) return;
     setIsExporting(true);
     setExportError("");
     try {
-      const sourceCanvas = document.createElement("canvas");
-      sourceCanvas.width = selectionSize.width;
-      sourceCanvas.height = selectionSize.height;
-      const sourceContext = sourceCanvas.getContext("2d");
-      if (!sourceContext) throw new Error("Could not create the export canvas");
-
-      const area = clampSelectionToCanvas(selection);
-      const image = sourceContext.createImageData(selectionSize.width, selectionSize.height);
-      const painted = image.data;
-      for (let y = area.minY; y <= area.maxY; y += 1) {
-        const rowStart = (y - CANVAS_MIN) * CANVAS_SIZE - CANVAS_MIN;
-        const target = (y - selection.minY) * selectionSize.width - selection.minX;
-        for (let x = area.minX; x <= area.maxX; x += 1) {
-          const cell = store.cells[rowStart + x];
-          if (cell === EMPTY_CELL) continue;
-          const offset = (target + x) * 4;
-          painted[offset] = (cell >>> 16) & 255;
-          painted[offset + 1] = (cell >>> 8) & 255;
-          painted[offset + 2] = cell & 255;
-          painted[offset + 3] = 255;
-        }
-      }
-      sourceContext.putImageData(image, 0, 0);
+      const sourceCanvas = renderSelectionCanvas(selection);
+      if (!sourceCanvas) throw new Error("Could not create the export canvas");
 
       const outputCanvas = document.createElement("canvas");
       outputCanvas.width = exportOutputSize.width;
@@ -2453,12 +1722,7 @@ function App() {
       outputContext.imageSmoothingEnabled = false;
       outputContext.drawImage(sourceCanvas, 0, 0, exportOutputSize.width, exportOutputSize.height);
 
-      const blob = await new Promise<Blob>((resolve, reject) => {
-        outputCanvas.toBlob((result) => {
-          if (result) resolve(result);
-          else reject(new Error("Could not encode the PNG"));
-        }, "image/png");
-      });
+      const blob = await canvasToPng(outputCanvas);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -2468,7 +1732,7 @@ function App() {
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
       setShowExport(false);
-      setSelection(null);
+      restoreSelectionAfterExport();
       setActivity(`Exported a ${exportOutputSize.width} by ${exportOutputSize.height} PNG.`);
     } catch (error) {
       console.error("Could not export the MCPixels selection", error);
@@ -2503,6 +1767,18 @@ function App() {
     }
   };
 
+  const routePastedImage = async (file: File) => {
+    const own = clipboardPngRef.current;
+    if (own && copiedSelection && !showExport && !showImport) {
+      const size = await readImageSize(file);
+      if (size && size.width === own.width && size.height === own.height) {
+        pasteSelection();
+        return;
+      }
+    }
+    await readImportFile(file);
+  };
+
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -2510,7 +1786,7 @@ function App() {
       const file = findImageFile(event.clipboardData?.files, event.clipboardData?.items);
       if (file) {
         event.preventDefault();
-        void readImportFile(file);
+        void routePastedImage(file);
         return;
       }
       if (showExport || showImport || !copiedSelection) return;
@@ -2597,6 +1873,64 @@ function App() {
     setActivity(`Imported ${changes.length} pixel${changes.length === 1 ? "" : "s"} as a ${width} by ${height} image at (${origin.x}, ${origin.y}).`);
   };
 
+  const selectWholeCanvas = () => {
+    setSelection({ minX: CANVAS_MIN, minY: CANVAS_MIN, maxX: CANVAS_MAX, maxY: CANVAS_MAX });
+    setTool("select");
+    setCanvasMenu(null);
+    setDockPanel(null);
+    setActivity(`Selected the whole ${CANVAS_SIZE} by ${CANVAS_SIZE} canvas.`);
+  };
+
+  const cancelHold = () => {
+    if (holdTimerRef.current === null) return;
+    window.clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = null;
+  };
+
+  const openBrushSizes = () => {
+    cancelHold();
+    heldOpenRef.current = true;
+    setCanvasMenu(null);
+    setDockPanel("size");
+  };
+
+  const brushSizeGestures = {
+    onPointerDown: () => {
+      cancelHold();
+      heldOpenRef.current = false;
+      holdTimerRef.current = window.setTimeout(openBrushSizes, HOLD_TO_OPEN);
+    },
+    onPointerUp: cancelHold,
+    onPointerLeave: cancelHold,
+    onPointerCancel: cancelHold,
+    onContextMenu: (event: ReactMouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      openBrushSizes();
+    },
+  };
+
+  const selectBrushTool = (next: Tool) => {
+    setTool(next);
+    if (heldOpenRef.current) {
+      heldOpenRef.current = false;
+      return;
+    }
+    setDockPanel(null);
+  };
+
+  const adjustBrushSize = (direction: number) => {
+    const size = stepBrushSize(brushSize, direction);
+    if (size === brushSize) return;
+    setBrushSize(size);
+    setActivity(`Brush size ${size}.`);
+  };
+
+  const chooseBrushSize = (size: number) => {
+    setBrushSize(size);
+    setDockPanel(null);
+    setActivity(`Brush size ${size}.`);
+  };
+
   const dismissSelection = () => {
     setShowExport(false);
     setSelection(null);
@@ -2629,11 +1963,19 @@ function App() {
       const wantsUndo = modifierPressed && key === "z" && !event.shiftKey;
       const wantsRedo = modifierPressed && ((key === "z" && event.shiftKey) || key === "y");
 
-      if (!isTyping && key === "escape" && (dockPanel || canvasMenu)) {
-        event.preventDefault();
-        setDockPanel(null);
-        setCanvasMenu(null);
-        return;
+      if (!isTyping && key === "escape") {
+        if (dockPanel || canvasMenu) {
+          event.preventDefault();
+          setDockPanel(null);
+          setCanvasMenu(null);
+          return;
+        }
+        if (!panelOpen && selection) {
+          event.preventDefault();
+          setSelection(null);
+          setActivity("Selection dismissed.");
+          return;
+        }
       }
 
       if (!panelOpen && !isTyping && wantsUndo && history.undoDepth > 0) {
@@ -2657,6 +1999,21 @@ function App() {
           cutSelection();
           return;
         }
+        if (key === "a") {
+          event.preventDefault();
+          selectWholeCanvas();
+          return;
+        }
+      }
+      if (!panelOpen && !isTyping && !modifierPressed && selection && (key === "delete" || key === "backspace")) {
+        event.preventDefault();
+        clearSelection();
+        return;
+      }
+      if (!panelOpen && !isTyping && !modifierPressed && !event.altKey && (key === "[" || key === "]")) {
+        event.preventDefault();
+        adjustBrushSize(key === "]" ? 1 : -1);
+        return;
       }
       const arrowMoves: Record<string, ScreenPoint | undefined> = {
         arrowleft: { x: -1, y: 0 },
@@ -2711,7 +2068,7 @@ function App() {
       window.removeEventListener("keyup", handleKeyUp);
       window.removeEventListener("blur", handleBlur);
     };
-  }, [canvasMenu, canvasSize, copiedSelection, dockPanel, history.redoDepth, history.undoDepth, selection, showExport, showImport, tool]);
+  }, [brushSize, canvasMenu, canvasSize, copiedSelection, dockPanel, history.redoDepth, history.undoDepth, selection, showExport, showImport, tool]);
 
   return (
     <main className="app-shell">
@@ -2733,6 +2090,15 @@ function App() {
             {statusText}
           </div>
         </div>
+        {notices.length > 0 ? (
+          <div className="notice-stack" aria-hidden="true">
+            {notices.map((notice) => (
+              <p key={notice.id} className={notice.leaving ? "notice notice--leaving" : "notice"}>
+                {notice.text}
+              </p>
+            ))}
+          </div>
+        ) : null}
       </header>
 
       <section className="editor" aria-label="MCPixels editor">
@@ -2817,6 +2183,30 @@ function App() {
             </section>
           ) : null}
 
+          {dockPanel === "size" ? (
+            <section className="dock-popover dock-popover--size" aria-label="Brush size">
+              <header>
+                <span>{tool === "erase" ? "Eraser" : "Brush"}</span>
+                <strong>{brushSize} px</strong>
+              </header>
+              <div className="popover-sizes">
+                {BRUSH_SIZES.map((size) => (
+                  <button
+                    key={size}
+                    className={size === brushSize ? "popover-option popover-option--active" : "popover-option"}
+                    type="button"
+                    aria-label={`${size} pixel ${tool === "erase" ? "eraser" : "brush"}`}
+                    aria-pressed={size === brushSize}
+                    title={`${size} px`}
+                    onClick={() => chooseBrushSize(size)}
+                  >
+                    <span style={{ width: `${4 + size * 2}px`, height: `${4 + size * 2}px` }} />
+                  </button>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
           {dockPanel === "more" ? (
             <section className="dock-popover dock-popover--more" aria-label="More canvas controls">
               <header><span>Files</span><strong>Canvas</strong></header>
@@ -2862,11 +2252,35 @@ function App() {
               <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 10V5.5a1.5 1.5 0 0 1 3 0V9M9 5V3.5a1.5 1.5 0 0 1 3 0V9M12 5a1.5 1.5 0 0 1 3 0v5M15 7.5a1.5 1.5 0 0 1 3 0V12c0 4-2.5 6-6.5 6H10c-2 0-3-1-4-2.5L2.5 11A1.6 1.6 0 0 1 5 9z" /></svg>
             </button>
             <span className="dock-divider" aria-hidden="true" />
-            <button className={tool === "paint" ? "dock-button dock-button--active" : "dock-button"} type="button" aria-label="Draw" aria-pressed={tool === "paint"} aria-keyshortcuts="B" title="Draw (B)" onClick={() => { setTool("paint"); setDockPanel(null); }}>
+            <button
+              className={`${tool === "paint" ? "dock-button dock-button--active" : "dock-button"} brush-dock-button`}
+              type="button"
+              aria-label="Draw"
+              aria-pressed={tool === "paint"}
+              aria-keyshortcuts="B"
+              aria-haspopup="dialog"
+              aria-expanded={dockPanel === "size"}
+              title="Draw (B) — hold or right-click for size, [ and ] to resize"
+              onClick={() => selectBrushTool("paint")}
+              {...brushSizeGestures}
+            >
               <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 14 1.2-4.2L13 2l5 5-7.8 7.8L6 16zM12 3l5 5M4 14l2 2" /></svg>
+              {brushSize > 1 ? <em>{brushSize}</em> : null}
             </button>
-            <button className={tool === "erase" ? "dock-button dock-button--active" : "dock-button"} type="button" aria-label="Erase" aria-pressed={tool === "erase"} aria-keyshortcuts="E" title="Erase (E)" onClick={() => { setTool("erase"); setDockPanel(null); }}>
+            <button
+              className={`${tool === "erase" ? "dock-button dock-button--active" : "dock-button"} brush-dock-button`}
+              type="button"
+              aria-label="Erase"
+              aria-pressed={tool === "erase"}
+              aria-keyshortcuts="E"
+              aria-haspopup="dialog"
+              aria-expanded={dockPanel === "size"}
+              title="Erase (E) — hold or right-click for size, [ and ] to resize"
+              onClick={() => selectBrushTool("erase")}
+              {...brushSizeGestures}
+            >
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3.5 14 9.5-9.5 7 7-7.5 7.5H8.5zM8 9.5l7 7M12.5 19H21" /></svg>
+              {brushSize > 1 ? <em>{brushSize}</em> : null}
             </button>
             <button className={tool === "fill" ? "dock-button dock-button--active" : "dock-button"} type="button" aria-label="Fill" aria-pressed={tool === "fill"} aria-keyshortcuts="G" title="Fill (G)" onClick={() => { setTool("fill"); setDockPanel(null); }}>
               <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 6-7 6 6-7 7zM7 6l6 6M15 14c0-1 1.5-3 1.5-3s1.5 2 1.5 3a1.5 1.5 0 0 1-3 0" /></svg>
@@ -3124,7 +2538,24 @@ function App() {
               <button type="button" role="menuitem" disabled={history.redoDepth === 0} onClick={() => { redoPixels(); setCanvasMenu(null); }}>Redo</button>
               <span aria-hidden="true" />
               <button type="button" role="menuitem" onClick={() => { setCanvasMenu(null); importInputRef.current?.click(); }}>Import image</button>
+              {selection ? (
+                <button type="button" role="menuitem" onClick={() => { setCanvasMenu(null); openExportPanel(); }}>Export selection</button>
+              ) : null}
+              <button type="button" role="menuitem" onClick={exportFullCanvas}>Export canvas</button>
               <button type="button" role="menuitem" onClick={() => { setViewport({ x: 0, y: 0, zoom: DEFAULT_ZOOM }); setCanvasMenu(null); }}>Center view</button>
+              <span aria-hidden="true" />
+              <button
+                className="danger-option"
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  dispatch({ type: "clear" });
+                  setCanvasMenu(null);
+                  setActivity("You cleared the canvas.");
+                }}
+              >
+                Clear canvas
+              </button>
             </div>
           ) : null}
           {showExport && selectionSize ? (
