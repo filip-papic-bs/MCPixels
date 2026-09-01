@@ -28,6 +28,8 @@ import {
   READ_ALPHABET,
   READ_BUDGET,
   READ_OVERVIEW_BUDGET,
+  SHADE_BUDGET,
+  SHADE_RAMP,
   planDraw,
   readPoint,
   readRect,
@@ -169,9 +171,7 @@ export async function registerAgentTools(
               type: "string",
               enum: ["chars", "rle"],
               description:
-                'How rows are encoded. Default "chars": one character per cell. ' +
-                '"rle" reads each row as runs of an optional count then one character, so "12k8r." is twelve k, eight r, one dot — ' +
-                "the same picture at a fraction of the size, which is how a large scene fits in one call and one undo step. " +
+                'How rows are encoded. Default "chars", one character per cell; "rle" reads them as runs, as above. ' +
                 'Digits are run counts in "rle", so no palette key may be a digit there.',
             },
             ops: {
@@ -187,11 +187,33 @@ export async function registerAgentTools(
               enum: ["left-right", "top-bottom", "both"],
               description: "Also mirror everything this call draws across the canvas center.",
             },
+            dryRun: {
+              type: "boolean",
+              description:
+                "Validate and price the call without drawing: same counts, bounds, warnings and hint, no pixels changed and no undo step. Worth one call before a big or expensive draw.",
+            },
           },
           additionalProperties: false,
         },
         execute: run(async (input: Record<string, unknown>) => {
           const plan = planDraw(controller.getCells(), input);
+          // Nothing has touched the canvas yet: planDraw has already validated
+          // every limit, palette key and coordinate, so a dry run can report the
+          // whole outcome and stop here.
+          if (input.dryRun === true) {
+            return {
+              dryRun: true,
+              painted: plan.painted,
+              erased: plan.erased,
+              unchanged: plan.unchanged,
+              clipped: plan.clipped,
+              bounds: plan.bounds ? [plan.bounds.minX, plan.bounds.minY, plan.bounds.maxX, plan.bounds.maxY] : null,
+              ...(plan.warnings.length > 0 ? { warnings: plan.warnings } : {}),
+              ...(plan.hint ? { hint: plan.hint } : {}),
+              note: "valid, and nothing was drawn — send the same call without dryRun to apply it",
+            };
+          }
+
           if (plan.changes.length === 0) {
             // Both can be true at once, so the note reports every reason.
             const reasons: string[] = [];
@@ -253,6 +275,12 @@ export async function registerAgentTools(
               description:
                 "[x0, y0, x1, y1] rectangle to read, inclusive, corners in any order. Defaults to everything painted.",
             },
+            shade: {
+              type: "boolean",
+              description:
+                `Also return "shaded": a thumbnail at most ${SHADE_BUDGET} characters a side, drawn "${SHADE_RAMP}" dark to light with space for empty. ` +
+                "It shows how light each cell is rather than which color it is, so you can see the composition instead of decoding it. For looking at, not for drawing back.",
+            },
           },
           additionalProperties: false,
         },
@@ -261,7 +289,7 @@ export async function registerAgentTools(
           const cells = controller.getCells();
           const requested =
             input.region === undefined || input.region === null ? null : readRect(input.region, '"region"');
-          const result = readRegion(cells, requested);
+          const result = readRegion(cells, requested, { shade: input.shade === true });
           const art = paintedBounds(cells);
           const selection = controller.getSelection();
 

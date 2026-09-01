@@ -12,7 +12,7 @@ import {
 } from "./pixels.ts";
 import type { CopiedSelection, SelectionBounds } from "./pixels.ts";
 import { AGENT_TOOL_COUNT, registerAgentTools } from "./agent/tools.ts";
-import { MAX_ROWS_CELLS, READ_BUDGET } from "./agent/encode.ts";
+import { MAX_ROWS_CELLS, READ_BUDGET, SHADE_BUDGET, SHADE_RAMP } from "./agent/encode.ts";
 import type { EditorController } from "./agent/controller.ts";
 import type { ModelContext, WebMcpTool } from "./webmcp.ts";
 
@@ -168,6 +168,72 @@ test("a read reports the limits and exact counts even when the rows are coarse",
   const half = await call("read_canvas", { region: [-50, -50, 49, -1] });
   assert.equal(half.painted, 5_000, "counts follow the region, not the whole canvas");
   assert.equal(half.paintedTotal, 10_000);
+});
+
+test("dryRun prices a call without touching the canvas", async () => {
+  const editor = fakeEditor();
+  const { call } = await registerTools(editor.controller);
+
+  const dry = await call("draw_pixel_art", {
+    origin: [0, 0],
+    palette: { k: "#161616" },
+    rows: ["kkk", "kkk"],
+    dryRun: true,
+  });
+  assert.equal(dry.dryRun, true);
+  assert.equal(dry.painted, 6, "it reports what the call would paint");
+  assert.deepEqual(dry.bounds, [0, 0, 2, 1]);
+  assert.equal(editor.store.cells[cellIndex(0, 0)], 0, "and nothing was drawn");
+  assert.equal(editor.store.undoStack.length, 0, "and no undo step was added");
+  assert.equal(editor.notices.length, 0, "and the person was not told about a non-event");
+
+  // The same call without dryRun does exactly what the dry run promised.
+  const wet = await call("draw_pixel_art", { origin: [0, 0], palette: { k: "#161616" }, rows: ["kkk", "kkk"] });
+  assert.equal(wet.painted, dry.painted);
+  assert.deepEqual(wet.bounds, dry.bounds);
+  assert.equal(editor.store.undoStack.length, 1);
+
+  // Invalid input still fails, which is the point of running it dry.
+  await assert.rejects(call("draw_pixel_art", { origin: [0, 0], rows: ["zz"], dryRun: true }), /not in the palette/);
+  await assert.rejects(
+    call("draw_pixel_art", {
+      origin: [0, 0],
+      palette: { k: "#161616" },
+      rows: Array(200).fill("k".repeat(200)),
+      dryRun: true,
+    }),
+    /format:"rle"/,
+  );
+});
+
+test("shade returns a thumbnail you can actually look at", async () => {
+  const editor = fakeEditor();
+  const { call } = await registerTools(editor.controller);
+
+  // A dark block above a light block: the thumbnail must show that contrast.
+  await call("draw_pixel_art", {
+    ops: "c #161616;rect -40 -40 39 -1 f;c #f5f1e8;rect -40 0 39 39 f",
+  });
+
+  const plain = await call("read_canvas", { region: [-40, -40, 39, 39] });
+  assert.equal(plain.shaded, undefined, "not returned unless asked for");
+
+  const read = await call("read_canvas", { region: [-40, -40, 39, 39], shade: true });
+  const shaded = read.shaded as string[];
+  assert.ok(shaded.length > 0 && shaded.length <= SHADE_BUDGET, "small enough to read");
+  assert.ok(shaded[0].length <= SHADE_BUDGET);
+
+  const darkRow = shaded[0];
+  const lightRow = shaded[shaded.length - 1];
+  assert.ok(SHADE_RAMP.indexOf(darkRow[0]) < SHADE_RAMP.indexOf(lightRow[0]), "the dark half reads darker");
+  assert.equal(darkRow, darkRow[0].repeat(darkRow.length), "a flat band is a flat row");
+
+  // Empty space is blank, not dark.
+  const sparse = fakeEditor();
+  const solo = await registerTools(sparse.controller);
+  await solo.call("draw_pixel_art", { ops: "c #f5f1e8;px 0 0" });
+  const gap = await solo.call("read_canvas", { region: [-20, -20, 19, 19], shade: true });
+  assert.match((gap.shaded as string[])[0], /^ +$/, "untouched rows are spaces");
 });
 
 test("undo walks several steps and stops when the history runs out", async () => {

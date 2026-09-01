@@ -130,6 +130,35 @@ other half.
 
 **One call is one undo step.** A call whose input is invalid changes nothing at all.
 
+Pass `dryRun: true` to validate and price a call without drawing it: you get the same
+`painted`, `erased`, `clipped`, `bounds`, warnings and hint, but no pixels change and no
+undo step is added. Every limit, palette key and coordinate is checked, so it is the cheap
+way to confirm a big call before committing it — and the person sees nothing, because
+nothing happened.
+
+## Seeing what you drew
+
+Tool results give you counts and bounds, which tell you a call landed but not whether it
+looks right. Pass `shade: true` to `read_canvas` for a `shaded` thumbnail: at most 48
+characters a side, drawn `.:-=+*#%@` from dark to light with a space for empty. Rows tell
+you *which* colour a cell is; `shaded` tells you *how light* it is, so the picture reads as
+a picture:
+
+```
+|................................@@......|   <- moon
+|.......................@@...............|
+|.....................::::::.............|   <- peaks
+|    ::::::::::   ::::::::::::::         |
+|----------------------------------------|   <- ground
+|-..-.--.-..-.--.-..-.--.-..-.--.-..-.--.|   <- textured foreground
+```
+
+It is a thumbnail, so it has a thumbnail's limits: two colours of similar lightness land on
+the same character however different their hues are, and sparse detail inside a block loses
+to the block's dominant colour. Use it to judge composition, balance and silhouette — then
+`read_canvas` without `shade` when you need the actual colours, or `export_pixel_art` when
+the person wants the real image.
+
 ## Read before you redraw
 
 `read_canvas` returns `{origin, palette, rows}` in the same shape `draw_pixel_art` takes,

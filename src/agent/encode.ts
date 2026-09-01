@@ -37,6 +37,15 @@ export const MAX_RLE_CELLS = 262_144;
 export const MAX_RLE_SOURCE_LENGTH = 1024;
 export const READ_RLE_BUDGET = 6_000;
 
+/**
+ * Characters ordered dark to light. Rows of palette keys say *which* color a
+ * cell is; these say how light it is, so the thumbnail reads as a picture
+ * instead of as labels — which is what makes composition judgeable in-result.
+ */
+export const SHADE_RAMP = ".:-=+*#%@";
+export const SHADE_EMPTY = " ";
+export const SHADE_BUDGET = 48;
+
 const HEX_COLOR = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/;
 const WHOLE_NUMBER = /^-?\d+$/;
 
@@ -819,6 +828,8 @@ export type ReadResult = {
   empty: number;
   colors: Record<string, number>;
   distinctColors: number;
+  /** A lightness thumbnail for judging composition. Present only when asked for. */
+  shaded?: string[];
   note?: string;
 };
 
@@ -912,7 +923,47 @@ function describeSample(sample: ReturnType<typeof sampleRegion>) {
   return { rows, palette, folded };
 }
 
-export function readRegion(cells: Uint32Array, region: SelectionBounds | null): ReadResult {
+/** Perceived lightness, 0..1. The green weighting is what keeps a blue sky dark. */
+function luminance(cell: number) {
+  const red = (cell >>> 16) & 255;
+  const green = (cell >>> 8) & 255;
+  const blue = cell & 255;
+  return (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
+}
+
+/**
+ * Renders a region as a lightness thumbnail, always small enough to look at
+ * whatever the region's size — this is for judging composition, never for
+ * drawing back.
+ */
+export function shadeRegion(cells: Uint32Array, area: SelectionBounds): string[] {
+  const width = area.maxX - area.minX + 1;
+  const height = area.maxY - area.minY + 1;
+  const scale = scaleForRegion(width, height, SHADE_BUDGET);
+  const { winners, columns, lines } = sampleRegion(cells, area, scale);
+
+  const rows: string[] = [];
+  for (let row = 0; row < lines; row += 1) {
+    let line = "";
+    for (let column = 0; column < columns; column += 1) {
+      const cell = winners[row * columns + column];
+      if (cell === EMPTY_CELL) {
+        line += SHADE_EMPTY;
+        continue;
+      }
+      const step = Math.min(SHADE_RAMP.length - 1, Math.floor(luminance(cell) * SHADE_RAMP.length));
+      line += SHADE_RAMP[step];
+    }
+    rows.push(line);
+  }
+  return rows;
+}
+
+export function readRegion(
+  cells: Uint32Array,
+  region: SelectionBounds | null,
+  options: { shade?: boolean } = {},
+): ReadResult {
   const budget = region ? READ_BUDGET : READ_OVERVIEW_BUDGET;
   const art = region ?? paintedBounds(cells);
   if (!art) {
@@ -994,6 +1045,7 @@ export function readRegion(cells: Uint32Array, region: SelectionBounds | null): 
     colors,
     distinctColors: ranked.length,
   };
+  if (options.shade) result.shaded = shadeRegion(cells, area);
   if (notes.length > 0) result.note = notes.join(" ");
   return result;
 }
