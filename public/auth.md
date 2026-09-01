@@ -18,7 +18,7 @@ when it loads, and they run inside the browser tab the person is looking at.
 So the access model is the tab itself:
 
 1. The person opens <https://mcpixels.app/> in a browser that exposes WebMCP
-   (the ChatGPT desktop app's built-in browser, or Chrome 146+ with
+   (the ChatGPT desktop app's built-in browser, or Chrome 149+ with
    `chrome://flags/#enable-webmcp-testing`).
 2. The browser surfaces the page's tools to the agent attached to that tab.
 3. The person's browser decides whether you may call them. That consent is the whole

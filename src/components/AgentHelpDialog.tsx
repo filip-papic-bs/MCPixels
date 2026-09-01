@@ -135,7 +135,7 @@ export const AgentHelpDialog = memo(function AgentHelpDialog({ onClose }: { onCl
               <strong>Site tools</strong> in the address bar.
             </li>
             <li>
-              In <strong>Chrome 146+</strong>, enable <code>chrome://flags/#enable-webmcp-testing</code> and reload.
+              In <strong>Chrome 149+</strong>, enable <code>chrome://flags/#enable-webmcp-testing</code> and reload.
             </li>
           </ul>
         </section>

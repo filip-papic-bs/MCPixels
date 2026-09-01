@@ -53,7 +53,7 @@ read → edit the rows → draw back is a closed loop with no reformatting.
 
 - **ChatGPT** — open the site in the ChatGPT desktop app's built-in browser, then check
   **Site tools** in the address bar.
-- **Chrome 146+** — enable `chrome://flags/#enable-webmcp-testing`, then from the
+- **Chrome 149+** — enable `chrome://flags/#enable-webmcp-testing`, then from the
   console: `navigator.modelContext.getTools()` and
   `executeTool("draw_pixel_art", { … })`.
 

@@ -11,7 +11,7 @@ Coordinates are centred: x and y run -512..511, y downward. The tools are `draw_
 per-pixel coordinates — a 32×32 sprite costs about 400 tokens that way instead of 22,500.
 
 There is nothing to call over HTTP: the tools only exist inside a loaded page, in a
-browser that supports WebMCP (the ChatGPT desktop app's browser, or Chrome 146+ with
+browser that supports WebMCP (the ChatGPT desktop app's browser, or Chrome 149+ with
 `chrome://flags/#enable-webmcp-testing`).
 
 ## Docs

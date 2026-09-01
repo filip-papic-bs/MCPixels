@@ -25,7 +25,7 @@ npm run check    # format/lint gate, tests, typecheck and production build
 To exercise the agent side:
 
 - **ChatGPT** — open the site in the ChatGPT desktop app's built-in browser, then check **Site tools** in the address bar.
-- **Chrome 146+** — enable `chrome://flags/#enable-webmcp-testing`, then from the console: `navigator.modelContext.getTools()` and `executeTool("draw_pixel_art", { … })`.
+- **Chrome 149+** — enable `chrome://flags/#enable-webmcp-testing`, then from the console: `navigator.modelContext.getTools()` and `executeTool("draw_pixel_art", { … })`.
 
 ## The six tools
 
