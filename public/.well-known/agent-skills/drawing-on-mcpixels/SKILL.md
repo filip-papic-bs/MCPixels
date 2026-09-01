@@ -82,8 +82,9 @@ three cells. `.` and `-` run like any other character.
 call is rejected rather than misread. Digit keys are still fine in `"chars"`.
 
 Two things still beat both encodings. `ops` is not counted against either cell cap, so a
-solid sky is cheapest as `c #2d7ff9; rect -100 -100 99 -20 f`. And `mirror` halves anything
-symmetrical. Reach for `rle` for the dense, irregular detail that is left.
+solid sky is cheapest as `c #2d7ff9; rect -100 -100 99 -20 f`, a silhouette as one `poly`,
+and a texture as one `fill`. And `mirror` halves anything symmetrical. Reach for `rle` for
+the dense, irregular detail that is left over.
 
 ## Large geometry goes through `ops`
 
@@ -97,12 +98,31 @@ c #2d7ff9; rect -20 -20 20 20 f; bucket 0 0
 - `px x y …` — individual cells.
 - `line x0 y0 x1 y1`
 - `rect x0 y0 x1 y1 [f]` / `ellipse x0 y0 x1 y1 [f]` — `f` fills.
+- `poly x0 y0 x1 y1 x2 y2 … [f]` — closes back to the first point. **`f` fills it**, so any
+  triangle or irregular silhouette is one op: a roof, a mountain, a fin, a hull.
+- `path x0 y0 x1 y1 …` — the same, left open. For wires, horizons and ground lines.
+- `fill x0 y0 x1 y1 checker A B [size]` / `fill x0 y0 x1 y1 dither A B [percent]` — writes a
+  two-colour pattern over a whole rectangle. `checker` takes a square size (default 1),
+  `dither` an ordered-dither density from 0 to 100 (default 50). Both are anchored to
+  absolute coordinates, so neighbouring fills tile without a seam.
 - `bucket x y` — flood fill.
 - `recolor from to x0 y0 x1 y1` — swap one colour for another inside a rectangle.
 
-Up to 128 ops, 4000 characters. `px` takes up to 500 `x y` pairs, and a single `line`,
-`rect` or `ellipse` covers up to 50,000 pixels. `rows` run first and later writes win, so
-one call can stamp a sprite and then rule a line across it.
+Up to 128 ops, 4000 characters. `px` takes up to 500 `x y` pairs, `poly` and `path` up to
+64 points, and a single shape or `fill` covers up to 50,000 pixels. `rows` run first and
+later writes win, so one call can stamp a sprite and then rule a line across it.
+
+A filled `poly` is always stroked as well as filled, so a shape keeps a crisp edge and a
+spur too thin to enclose any cells still shows up. That whole mountain scene — dithered
+sky, two filled peaks, a snow cap, an open ground line and a tiled foreground — is 255
+characters of `ops` and 947 pixels:
+
+```
+c #2d7ff9;fill -20 -12 19 -2 dither #2d7ff9 #f5f1e8 25;
+c #7557d3;poly -20 8 -8 -6 2 8 f;
+c #45b86b;poly -2 8 8 -10 18 8 f;
+c #161616;path -20 9 -10 9 -6 11 4 11 8 9 19 9
+```
 
 `mirror` (`"left-right"`, `"top-bottom"`, `"both"`) repeats everything the call draws
 across the canvas centre — draw half a symmetrical thing and let the tool write the

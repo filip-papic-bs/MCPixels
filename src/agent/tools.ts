@@ -17,6 +17,7 @@ import {
   MAX_OPS,
   MAX_OPS_LENGTH,
   MAX_PALETTE,
+  MAX_POLY_POINTS,
   MAX_PX_PAIRS,
   MAX_RLE_CELLS,
   MAX_RLE_ROWS,
@@ -51,6 +52,7 @@ const AGENT_LIMITS = {
   maxOps: MAX_OPS,
   maxOpsLength: MAX_OPS_LENGTH,
   maxPxPairs: MAX_PX_PAIRS,
+  maxPolyPoints: MAX_POLY_POINTS,
   maxShapePixels: MAX_SHAPE_PIXELS,
   exactReadSize: READ_BUDGET,
   exactReadColors: READ_ALPHABET.length,
@@ -140,8 +142,10 @@ export async function registerAgentTools(
           `Draw editable pixel art on the live canvas; x and y run ${CANVAS_MIN}..${CANVAS_MAX}, y downward. ` +
           'rows place one-character palette entries from origin; "." keeps a cell and "-" erases it. ' +
           'Set format:"rle" to send those rows as runs instead ("12k8r." is twelve k, eight r, one dot), which fits a whole large scene in one call. ' +
-          'ops are ";"-separated: c COLOR; px x y...; line x0 y0 x1 y1; rect/ellipse x0 y0 x1 y1 [f]; bucket x y; recolor from to x0 y0 x1 y1. ' +
-          'COLOR is a palette key, hex, or "-"; f fills. Ops use absolute coordinates. ' +
+          'ops are ";"-separated: c COLOR; px x y...; line x0 y0 x1 y1; rect/ellipse x0 y0 x1 y1 [f]; ' +
+          "poly x0 y0 x1 y1 x2 y2... [f]; path x0 y0 x1 y1...; fill x0 y0 x1 y1 checker|dither A B [n]; bucket x y; recolor from to x0 y0 x1 y1. " +
+          'COLOR is a palette key, hex, or "-"; f fills. poly closes back to its first point and path does not, so poly ... f is any filled polygon — a roof, a mountain, a fin. ' +
+          "fill writes a two-color pattern over a whole rectangle: checker takes a square size, dither an ordered-dither percent of B. Ops use absolute coordinates. " +
           "Rows run first and later writes win. Off-canvas clips. One call is one undo step; invalid input changes nothing.",
         inputSchema: {
           type: "object",
@@ -174,7 +178,7 @@ export async function registerAgentTools(
               type: "string",
               description:
                 `Command string, up to ${MAX_OPS} ops and ${MAX_OPS_LENGTH} characters. ` +
-                `px takes up to ${MAX_PX_PAIRS} x y pairs; one line, rect or ellipse covers up to ${MAX_SHAPE_PIXELS} pixels. ` +
+                `px takes up to ${MAX_PX_PAIRS} x y pairs, poly and path up to ${MAX_POLY_POINTS} points; one shape or fill covers up to ${MAX_SHAPE_PIXELS} pixels. ` +
                 "Ops are not counted against the rows cell limit, so large flat geometry is cheapest here.",
               maxLength: MAX_OPS_LENGTH,
             },

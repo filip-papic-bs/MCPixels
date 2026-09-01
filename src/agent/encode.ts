@@ -161,6 +161,69 @@ export function encodeRleRow(chars: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Polygons and patterns
+// ---------------------------------------------------------------------------
+
+export const MAX_POLY_POINTS = 64;
+export const MAX_CHECKER_SIZE = 256;
+
+type Point = { x: number; y: number };
+
+/**
+ * Even-odd scanline fill. Sampling at each pixel's own centre with a half-open
+ * comparison is what makes a vertex count once rather than twice; the outline is
+ * drawn over the top regardless, which covers the degenerate spans this misses.
+ */
+export function pixelsInPolygon(points: Point[]): Point[] {
+  const inside: Point[] = [];
+  let top = Number.POSITIVE_INFINITY;
+  let bottom = Number.NEGATIVE_INFINITY;
+  for (const point of points) {
+    if (point.y < top) top = point.y;
+    if (point.y > bottom) bottom = point.y;
+  }
+
+  const crossings: number[] = [];
+  for (let y = top; y <= bottom; y += 1) {
+    crossings.length = 0;
+    for (let index = 0; index < points.length; index += 1) {
+      const from = points[index];
+      const to = points[(index + 1) % points.length];
+      if (from.y <= y === to.y <= y) continue;
+      crossings.push(from.x + ((y - from.y) / (to.y - from.y)) * (to.x - from.x));
+    }
+    crossings.sort((a, b) => a - b);
+    for (let pair = 0; pair + 1 < crossings.length; pair += 2) {
+      const start = Math.ceil(crossings[pair]);
+      const end = Math.floor(crossings[pair + 1]);
+      for (let x = start; x <= end; x += 1) inside.push({ x, y });
+    }
+  }
+  return inside;
+}
+
+// A 4x4 ordered dither. Bitwise & keeps the index non-negative for negative
+// coordinates, so a pattern is continuous across the origin.
+const BAYER_4 = [
+  [0, 8, 2, 10],
+  [12, 4, 14, 6],
+  [3, 11, 1, 9],
+  [15, 7, 13, 5],
+];
+
+/** True when this cell should take the second color at the given density. */
+export function ditherPicksSecond(x: number, y: number, percent: number) {
+  return (BAYER_4[y & 3][x & 3] + 0.5) / 16 < percent / 100;
+}
+
+/** True when this cell falls on a "first color" square of the checkerboard. */
+export function checkerPicksFirst(x: number, y: number, size: number) {
+  const column = Math.floor(x / size);
+  const row = Math.floor(y / size);
+  return (((column + row) % 2) + 2) % 2 === 0;
+}
+
+// ---------------------------------------------------------------------------
 // The draw planner
 // ---------------------------------------------------------------------------
 
@@ -412,6 +475,114 @@ function planOps(
       return;
     }
 
+    if (name === "poly" || name === "path") {
+      const value = color();
+      const closed = name === "poly";
+      let coordinates = args;
+      let filled = false;
+      if (closed && coordinates.at(-1)?.toLowerCase() === "f") {
+        filled = true;
+        coordinates = coordinates.slice(0, -1);
+      }
+      if (coordinates.length % 2 !== 0) {
+        fail(`${where}: needs x y pairs${closed ? " and an optional f" : ""}, got an odd number of values`);
+      }
+      const least = closed ? 3 : 2;
+      if (coordinates.length / 2 < least) {
+        fail(`${where}: needs at least ${least} points, got ${coordinates.length / 2}`);
+      }
+      if (coordinates.length / 2 > MAX_POLY_POINTS) {
+        fail(`${where}: ${coordinates.length / 2} points exceeds the limit of ${MAX_POLY_POINTS}`);
+      }
+      const points: Point[] = [];
+      for (let pair = 0; pair < coordinates.length / 2; pair += 1) {
+        points.push({
+          x: readOpInt(coordinates[pair * 2], where),
+          y: readOpInt(coordinates[pair * 2 + 1], where),
+        });
+      }
+
+      // Priced before anything is generated: the outline by the span of its
+      // segments, a fill by the box that bounds it.
+      let cost = 0;
+      const edges = closed ? points.length : points.length - 1;
+      for (let edge = 0; edge < edges; edge += 1) {
+        const from = points[edge];
+        const to = points[(edge + 1) % points.length];
+        cost += Math.max(Math.abs(to.x - from.x), Math.abs(to.y - from.y)) + 1;
+      }
+      if (filled) {
+        const xs = points.map((point) => point.x);
+        const ys = points.map((point) => point.y);
+        cost += (Math.max(...xs) - Math.min(...xs) + 1) * (Math.max(...ys) - Math.min(...ys) + 1);
+      }
+      if (cost > MAX_SHAPE_PIXELS) {
+        fail(`${where}: that shape is about ${cost} pixels; the limit is ${MAX_SHAPE_PIXELS} per op`);
+      }
+
+      if (filled) {
+        for (const point of pixelsInPolygon(points)) record(point.x, point.y, value);
+      }
+      // Always stroked, so a filled shape keeps a crisp edge and a spur too thin
+      // for the scanline still appears.
+      for (let edge = 0; edge < edges; edge += 1) {
+        const from = points[edge];
+        const to = points[(edge + 1) % points.length];
+        for (const point of pixelsOnLine(from, to, "#000000")) record(point.x, point.y, value);
+      }
+      return;
+    }
+
+    if (name === "fill") {
+      if (args.length < 7 || args.length > 8) {
+        fail(`${where}: needs x0 y0 x1 y1, a mode, two colors and an optional number, got ${args.length} values`);
+      }
+      const [x0, y0, x1, y1] = args.slice(0, 4).map((token) => readOpInt(token, where));
+      const mode = args[4].toLowerCase();
+      if (mode !== "checker" && mode !== "dither") {
+        fail(`${where}: "${args[4]}" is not a fill mode (use checker or dither)`);
+      }
+      const first = readOpColor(args[5], palette, where);
+      const second = readOpColor(args[6], palette, where);
+      const region = intersectCanvas({
+        minX: Math.min(x0, x1),
+        minY: Math.min(y0, y1),
+        maxX: Math.max(x0, x1),
+        maxY: Math.max(y0, y1),
+      });
+      // Entirely off canvas is nothing to do, matching how other writes clip.
+      if (!region) return;
+      const area = (region.maxX - region.minX + 1) * (region.maxY - region.minY + 1);
+      if (area > MAX_SHAPE_PIXELS) {
+        fail(`${where}: that region is ${area} pixels; the limit is ${MAX_SHAPE_PIXELS} per op`);
+      }
+
+      const given = args.length === 8 ? readOpInt(args[7], where) : null;
+      if (mode === "checker") {
+        const size = given ?? 1;
+        if (size < 1 || size > MAX_CHECKER_SIZE) {
+          fail(`${where}: checker square size must be 1 to ${MAX_CHECKER_SIZE}, got ${size}`);
+        }
+        for (let y = region.minY; y <= region.maxY; y += 1) {
+          for (let x = region.minX; x <= region.maxX; x += 1) {
+            record(x, y, checkerPicksFirst(x, y, size) ? first : second);
+          }
+        }
+        return;
+      }
+
+      const percent = given ?? 50;
+      if (percent < 0 || percent > 100) {
+        fail(`${where}: dither percent must be 0 to 100, got ${percent}`);
+      }
+      for (let y = region.minY; y <= region.maxY; y += 1) {
+        for (let x = region.minX; x <= region.maxX; x += 1) {
+          record(x, y, ditherPicksSecond(x, y, percent) ? second : first);
+        }
+      }
+      return;
+    }
+
     if (name === "rect" || name === "ellipse") {
       const value = color();
       const filled = args.length === 5;
@@ -483,7 +654,7 @@ function planOps(
       return;
     }
 
-    fail(`${where}: unknown op (use c, px, line, rect, ellipse, bucket, recolor)`);
+    fail(`${where}: unknown op (use c, px, line, poly, path, rect, ellipse, fill, bucket, recolor)`);
   });
 }
 

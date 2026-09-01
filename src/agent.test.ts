@@ -3,6 +3,7 @@ import test from "node:test";
 import { CANVAS_SIZE, cellFromColor, cellIndex } from "./pixels.ts";
 import {
   MAX_OPS,
+  MAX_POLY_POINTS,
   READ_OVERVIEW_BUDGET,
   AgentError,
   decodeRleRow,
@@ -131,7 +132,7 @@ test("parse errors name the problem and how to fix it", () => {
 
   assert.equal(
     message({ ops: "rekt 1 2 3 4" }),
-    'ops op 1 "rekt": unknown op (use c, px, line, rect, ellipse, bucket, recolor)',
+    'ops op 1 "rekt": unknown op (use c, px, line, poly, path, rect, ellipse, fill, bucket, recolor)',
   );
   assert.equal(
     message({ ops: "px 0 0" }),
@@ -271,6 +272,91 @@ test("rle rejects what it cannot represent", () => {
     () => planDraw(cells, { origin: [0, 0], palette: { k: "#161616" }, rows: Array(200).fill("k".repeat(200)) }),
     /format:"rle"/,
   );
+});
+
+test("poly fills the shapes that used to need hand rasterizing", () => {
+  const cells = emptyCells();
+
+  // A roof: the filled triangle nobody wants to work out row by row.
+  const roof = draw(cells, { ops: "c #ff5c35;poly 0 10 5 0 10 10 f" });
+  assert.deepEqual(roof.bounds, { minX: 0, minY: 0, maxX: 10, maxY: 10 });
+  assert.equal(cells[cellIndex(5, 1)], cellFromColor("#ff5c35"), "just under the apex is inside");
+  assert.equal(cells[cellIndex(5, 10)], cellFromColor("#ff5c35"), "the base is drawn");
+  assert.equal(cells[cellIndex(0, 0)], 0, "the corner outside the slope is not");
+  assert.equal(cells[cellIndex(10, 0)], 0);
+
+  // Every row of a triangle is a contiguous span, and the rows widen downward.
+  for (let y = 1; y <= 10; y += 1) {
+    const row: number[] = [];
+    for (let x = 0; x <= 10; x += 1) if (cells[cellIndex(x, y)] !== 0) row.push(x);
+    assert.ok(row.length > 0, `row ${y} has pixels`);
+    assert.equal(row.at(-1)! - row[0] + 1, row.length, `row ${y} is one unbroken span`);
+  }
+
+  // Outline only leaves the middle empty, and closes the loop.
+  const hollow = emptyCells();
+  draw(hollow, { ops: "c #161616;poly 0 0 8 0 8 8 0 8" });
+  assert.equal(hollow[cellIndex(4, 0)], cellFromColor("#161616"), "the given edges are drawn");
+  assert.equal(hollow[cellIndex(0, 4)], cellFromColor("#161616"), "and the edge back to the first point");
+  assert.equal(hollow[cellIndex(4, 4)], 0, "an unfilled poly is hollow");
+
+  // path walks the same points but never closes: the last edge is missing.
+  const open = emptyCells();
+  draw(open, { ops: "c #161616;path 0 0 8 0 8 8 0 8" });
+  assert.equal(open[cellIndex(4, 0)], cellFromColor("#161616"), "the given edges are still drawn");
+  assert.equal(open[cellIndex(8, 4)], cellFromColor("#161616"));
+  assert.equal(open[cellIndex(4, 8)], cellFromColor("#161616"));
+  assert.equal(open[cellIndex(0, 4)], 0, "but nothing closes it back to the start");
+});
+
+test("poly and path refuse what they cannot draw", () => {
+  const cells = emptyCells();
+
+  assert.throws(() => planDraw(cells, { ops: "c #161616;poly 0 0 5 5" }), /at least 3 points/);
+  assert.throws(() => planDraw(cells, { ops: "c #161616;path 0 0" }), /at least 2 points/);
+  assert.throws(() => planDraw(cells, { ops: "c #161616;poly 0 0 5 5 9" }), /odd number of values/);
+  assert.throws(() => planDraw(cells, { ops: "poly 0 0 5 5 9 9" }), /no color set yet/);
+
+  const many = Array.from({ length: MAX_POLY_POINTS + 1 }, (_, at) => `${at} ${at}`).join(" ");
+  assert.throws(() => planDraw(cells, { ops: `c #161616;poly ${many}` }), /exceeds the limit/);
+
+  // A huge filled polygon is priced by its bounding box before it is generated.
+  assert.throws(() => planDraw(cells, { ops: "c #161616;poly -300 -300 300 -300 0 300 f" }), /the limit is/);
+});
+
+test("fill lays down patterns a row at a time would not", () => {
+  const cells = emptyCells();
+
+  const checker = draw(cells, { ops: "c #161616;fill 0 0 3 3 checker #161616 #f5f1e8" });
+  assert.equal(checker.painted, 16, "every cell in the region is written");
+  assert.equal(cells[cellIndex(0, 0)], cellFromColor("#161616"));
+  assert.equal(cells[cellIndex(1, 0)], cellFromColor("#f5f1e8"), "neighbours alternate");
+  assert.equal(cells[cellIndex(0, 1)], cellFromColor("#f5f1e8"));
+  assert.equal(cells[cellIndex(1, 1)], cellFromColor("#161616"));
+
+  // Squares bigger than one cell, and continuous across the origin.
+  const blocks = emptyCells();
+  draw(blocks, { ops: "c #161616;fill -4 -4 3 3 checker #161616 #f5f1e8 2" });
+  assert.equal(blocks[cellIndex(0, 0)], blocks[cellIndex(1, 1)], "a 2x2 square is one color");
+  assert.notEqual(blocks[cellIndex(0, 0)], blocks[cellIndex(2, 0)], "the next square differs");
+  assert.equal(blocks[cellIndex(-1, -1)], blocks[cellIndex(-2, -2)], "and it keeps tiling past zero");
+
+  // Dither density is monotonic: more percent, more of the second color.
+  const counts = [0, 25, 50, 75, 100].map((percent) => {
+    const scratch = emptyCells();
+    draw(scratch, { ops: `c #161616;fill 0 0 15 15 dither #161616 #f5f1e8 ${percent}` });
+    let second = 0;
+    for (let y = 0; y <= 15; y += 1) {
+      for (let x = 0; x <= 15; x += 1) if (scratch[cellIndex(x, y)] === cellFromColor("#f5f1e8")) second += 1;
+    }
+    return second;
+  });
+  assert.deepEqual(counts, [0, 64, 128, 192, 256], "each step adds a quarter of the 256 cells");
+
+  assert.throws(() => planDraw(cells, { ops: "c #161616;fill 0 0 3 3 swirl #161616 #f5f1e8" }), /not a fill mode/);
+  assert.throws(() => planDraw(cells, { ops: "c #161616;fill 0 0 3 3 dither #161616 #f5f1e8 120" }), /0 to 100/);
+  assert.throws(() => planDraw(cells, { ops: "c #161616;fill 0 0 3 3 checker #161616 #f5f1e8 0" }), /size must be/);
+  assert.throws(() => planDraw(cells, { ops: "c #161616;fill 0 0 300 300 checker #161616 #f5f1e8" }), /the limit is/);
 });
 
 test("a read is only exact when both geometry and color survive", () => {
