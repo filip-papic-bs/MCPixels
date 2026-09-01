@@ -24,7 +24,7 @@ even-sized region centred on the origin runs `-n/2 .. n/2-1`, so a 200×200 area
 | tool | what it does |
 | --- | --- |
 | `draw_pixel_art` | The only tool you send pixel data to: `rows` of palette characters, an `ops` command string, or both, plus optional `mirror`. |
-| `read_canvas` | Reads a region back in exactly the format `draw_pixel_art` accepts. |
+| `read_canvas` | Reads a region back in exactly the format `draw_pixel_art` accepts, and reports the canvas state: exact cell and colour counts, bounds, selection, view, history depth and every tool limit. |
 | `selection` | Moves art that is already there — duplicate, move, erase, flip, rotate, copy/cut/paste, set/dismiss the marquee. No pixel data travels through it. |
 | `edit` | `undo`, `redo` (up to 20 steps), `clear-canvas`. One timeline, shared with the person. |
 | `view` | Frames a region on screen. Draws nothing. |
@@ -113,8 +113,26 @@ things to watch:
   before relying on them. There is currently no way to pull a region larger than 64×64
   back exactly in one call.
 
-Omit `region` for an overview of everything painted. The reply also carries `art` (the
-bounds of everything painted), `selection`, and the person's current `view`.
+Omit `region` for an overview of everything painted.
+
+### A read is also how you learn the state
+
+Every read carries more than rows, and the numbers stay **exact even when the rows do
+not** — they are counted over raw cells, not over the downscaled blocks:
+
+| field | what it tells you |
+| --- | --- |
+| `painted` / `empty` | exact cell counts inside the region |
+| `colors` | the 16 most used colours with exact counts, `distinctColors` for the true total |
+| `art` / `paintedTotal` | bounds and cell count for everything on the canvas, not just the region |
+| `selection` | what the person has selected |
+| `view` | where they are looking |
+| `history` | `{undo, redo}` depth, so you know how far back a mistake can be walked |
+| `limits` | every cap in one object — `maxCellsPerDraw`, `maxRows`, `maxRowLength`, `maxOps`, `maxPxPairs`, `maxShapePixels`, `exactReadSize`, `exactReadColors`, and the rest |
+
+So **read once before a large draw.** A single read tells you the real cell cap, how much
+of your target area is already painted, and which colours are in play — none of which you
+should be discovering from a rejected 40,000-cell write.
 
 ## Rearrange with `selection`, not by redrawing
 

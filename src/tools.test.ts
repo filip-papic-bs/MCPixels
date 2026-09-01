@@ -12,6 +12,7 @@ import {
 } from "./pixels.ts";
 import type { CopiedSelection, SelectionBounds } from "./pixels.ts";
 import { AGENT_TOOL_COUNT, registerAgentTools } from "./agent/tools.ts";
+import { MAX_ROWS_CELLS, READ_BUDGET } from "./agent/encode.ts";
 import type { EditorController } from "./agent/controller.ts";
 import type { ModelContext, WebMcpTool } from "./webmcp.ts";
 
@@ -141,6 +142,31 @@ test("an agent can draw, read back, rearrange and export", async () => {
   assert.ok(editor.notices.length >= 6, "each action told the person what happened");
 });
 
+test("a read reports the limits and exact counts even when the rows are coarse", async () => {
+  const editor = fakeEditor();
+  const { call } = await registerTools(editor.controller);
+
+  await call("draw_pixel_art", { ops: "c #161616;rect -50 -50 49 49 f;c #ff5c35;rect -10 -10 9 9 f" });
+
+  const read = await call("read_canvas", { region: [-50, -50, 49, 49] });
+  assert.equal(read.exact, false, "a 100x100 region cannot come back exactly");
+  assert.ok(read.scale > 1);
+
+  assert.equal(read.painted, 10_000, "every painted cell is counted, not every block");
+  assert.equal(read.empty, 0);
+  assert.deepEqual(read.colors, { "#161616": 9_600, "#ff5c35": 400 });
+  assert.equal(read.distinctColors, 2);
+  assert.equal(read.paintedTotal, 10_000);
+
+  assert.equal(read.limits.maxCellsPerDraw, MAX_ROWS_CELLS);
+  assert.equal(read.limits.exactReadSize, READ_BUDGET);
+  assert.deepEqual(read.history, { undo: 1, redo: 0 });
+
+  const half = await call("read_canvas", { region: [-50, -50, 49, -1] });
+  assert.equal(half.painted, 5_000, "counts follow the region, not the whole canvas");
+  assert.equal(half.paintedTotal, 10_000);
+});
+
 test("undo walks several steps and stops when the history runs out", async () => {
   const editor = fakeEditor();
   const { call } = await registerTools(editor.controller);
@@ -220,7 +246,7 @@ test("results reflect writes made earlier in the same call", async () => {
   assert.deepEqual(moved.selection, [10, 10, 11, 11]);
 
   const undone = await call("edit", { op: "undo" });
-  assert.deepEqual(undone.undo, { steps: 1, redo: 1 });
+  assert.deepEqual(undone.history, { undo: 1, redo: 1 });
 });
 
 test("view refuses to move the canvas out from under a live stroke", async () => {

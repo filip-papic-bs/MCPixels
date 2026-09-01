@@ -29,6 +29,7 @@ export const READ_BUDGET = 64;
 export const READ_OVERVIEW_BUDGET = 48;
 export const READ_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 export const HINT_MIN_CELLS = 64;
+export const READ_HISTOGRAM = 16;
 
 const HEX_COLOR = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/;
 const WHOLE_NUMBER = /^-?\d+$/;
@@ -554,6 +555,9 @@ export type ReadResult = {
   palette: Record<string, string>;
   rows: string[];
   painted: number;
+  empty: number;
+  colors: Record<string, number>;
+  distinctColors: number;
   note?: string;
 };
 
@@ -564,12 +568,22 @@ export function scaleForRegion(width: number, height: number, budget = READ_BUDG
 }
 
 export function readRegion(cells: Uint32Array, region: SelectionBounds | null): ReadResult {
-  // An omitted region can span the whole canvas, so it gets the tighter budget;
-  // a region the agent asked for by name keeps full detail.
   const budget = region ? READ_BUDGET : READ_OVERVIEW_BUDGET;
   const art = region ?? paintedBounds(cells);
   if (!art) {
-    return { origin: [0, 0], size: [0, 0], scale: 1, exact: true, folded: 0, palette: {}, rows: [], painted: 0 };
+    return {
+      origin: [0, 0],
+      size: [0, 0],
+      scale: 1,
+      exact: true,
+      folded: 0,
+      palette: {},
+      rows: [],
+      painted: 0,
+      empty: 0,
+      colors: {},
+      distinctColors: 0,
+    };
   }
   const area = intersectCanvas(art);
   if (!area) fail(`region is entirely off the ${CANVAS_MIN}..${CANVAS_MAX} canvas`);
@@ -582,6 +596,7 @@ export function readRegion(cells: Uint32Array, region: SelectionBounds | null): 
   const winners = new Uint32Array(columns * lines);
   const counts = new Map<number, number>();
   const block = new Map<number, number>();
+  const histogram = new Map<number, number>();
   let painted = 0;
 
   for (let row = 0; row < lines; row += 1) {
@@ -596,6 +611,7 @@ export function readRegion(cells: Uint32Array, region: SelectionBounds | null): 
           const cell = cells[cellIndex(area.minX + x, area.minY + y)];
           if (cell === EMPTY_CELL) continue;
           painted += 1;
+          histogram.set(cell, (histogram.get(cell) ?? 0) + 1);
           const count = (block.get(cell) ?? 0) + 1;
           block.set(cell, count);
           // Most common wins; a tie goes to the lower packed value so the same
@@ -636,6 +652,10 @@ export function readRegion(cells: Uint32Array, region: SelectionBounds | null): 
     palette[READ_ALPHABET[index]] = colorFromCell(cell);
   });
 
+  const ranked = [...histogram.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+  const colors: Record<string, number> = {};
+  for (const [cell, count] of ranked.slice(0, READ_HISTOGRAM)) colors[colorFromCell(cell)] = count;
+
   const notes: string[] = [];
   if (scale > 1) {
     notes.push(
@@ -643,6 +663,11 @@ export function readRegion(cells: Uint32Array, region: SelectionBounds | null): 
     );
   }
   if (folded > 0) notes.push(`${folded} rare colors were folded into the nearest kept color.`);
+  if (ranked.length > READ_HISTOGRAM) {
+    notes.push(
+      `"colors" lists the ${READ_HISTOGRAM} most used of ${ranked.length} colors; the counts it gives are exact.`,
+    );
+  }
 
   const result: ReadResult = {
     origin: [area.minX, area.minY],
@@ -655,6 +680,9 @@ export function readRegion(cells: Uint32Array, region: SelectionBounds | null): 
     palette,
     rows,
     painted,
+    empty: width * height - painted,
+    colors,
+    distinctColors: ranked.length,
   };
   if (notes.length > 0) result.note = notes.join(" ");
   return result;

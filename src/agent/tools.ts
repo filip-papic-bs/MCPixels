@@ -34,6 +34,25 @@ import type { ModelContext } from "../webmcp";
 
 export const AGENT_TOOL_COUNT = 6;
 export const MAX_DUPLICATES = 64;
+export const MAX_EDIT_STEPS = 20;
+
+const AGENT_LIMITS = {
+  canvas: [CANVAS_MIN, CANVAS_MIN, CANVAS_MAX, CANVAS_MAX],
+  maxCellsPerDraw: MAX_ROWS_CELLS,
+  maxRows: MAX_ROWS,
+  maxRowLength: MAX_ROW_LENGTH,
+  maxPaletteEntries: MAX_PALETTE,
+  maxOps: MAX_OPS,
+  maxOpsLength: MAX_OPS_LENGTH,
+  maxPxPairs: MAX_PX_PAIRS,
+  maxShapePixels: MAX_SHAPE_PIXELS,
+  exactReadSize: READ_BUDGET,
+  exactReadColors: READ_ALPHABET.length,
+  overviewReadSize: READ_OVERVIEW_BUDGET,
+  maxDuplicates: MAX_DUPLICATES,
+  maxEditSteps: MAX_EDIT_STEPS,
+  maxExportScale: MAX_EXPORT_SCALE,
+} as const;
 
 const RECT_SCHEMA = {
   type: "array",
@@ -202,7 +221,9 @@ export async function registerAgentTools(
           'Here "." marks an empty cell, but drawn back it preserves the destination — use "-" to erase. ' +
           `Omit region for an overview of everything painted, downscaled to at most ${READ_OVERVIEW_BUDGET} characters a side; name a region for native resolution up to ${READ_BUDGET}x${READ_BUDGET}, larger areas are block-downscaled. ` +
           `"exact" is true only when the region is at most ${READ_BUDGET}x${READ_BUDGET} AND holds at most ${READ_ALPHABET.length} distinct colors — rarer colors fold into the nearest kept one. ` +
-          "When it is false the rows are an approximation: read smaller regions in turn before relying on them.",
+          "When it is false the rows are an approximation: read smaller regions in turn before relying on them. " +
+          'Every read also reports the state you need to plan with — "painted"/"empty"/"colors" counts that stay exact however coarse the rows are, ' +
+          'plus "art", "selection", "view", "history" and the full "limits" table. Read once before a large draw and you will not have to learn a cap by hitting it.',
         inputSchema: {
           type: "object",
           properties: {
@@ -230,11 +251,16 @@ export async function registerAgentTools(
             { kind: "view", bounds: requested ?? art ?? undefined },
           );
 
+          const history = controller.getHistory();
+
           return {
             ...result,
             art: art ? [art.minX, art.minY, art.maxX, art.maxY] : null,
+            paintedTotal: controller.countPainted(),
             selection: selection ? [selection.minX, selection.minY, selection.maxX, selection.maxY] : null,
             view: controller.getViewport(),
+            history: { undo: history.undoDepth, redo: history.redoDepth },
+            limits: AGENT_LIMITS,
           };
         }),
       },
@@ -478,7 +504,12 @@ export async function registerAgentTools(
           type: "object",
           properties: {
             op: { type: "string", enum: ["undo", "redo", "clear-canvas"] },
-            steps: { type: "integer", minimum: 1, maximum: 20, description: "How many undo or redo steps. Default 1." },
+            steps: {
+              type: "integer",
+              minimum: 1,
+              maximum: MAX_EDIT_STEPS,
+              description: "How many undo or redo steps. Default 1.",
+            },
           },
           required: ["op"],
           additionalProperties: false,
@@ -492,7 +523,7 @@ export async function registerAgentTools(
             return {
               op,
               applied,
-              undo: { steps: history.undoDepth, redo: history.redoDepth },
+              history: { undo: history.undoDepth, redo: history.redoDepth },
               selection: selection ? [selection.minX, selection.minY, selection.maxX, selection.maxY] : null,
             };
           };
@@ -508,8 +539,8 @@ export async function registerAgentTools(
           if (op !== "undo" && op !== "redo") throw new AgentError(`unknown edit op "${op}"`);
 
           const steps = input.steps === undefined ? 1 : Number(input.steps);
-          if (!Number.isSafeInteger(steps) || steps < 1 || steps > 20) {
-            throw new AgentError('"steps" must be a whole number from 1 to 20');
+          if (!Number.isSafeInteger(steps) || steps < 1 || steps > MAX_EDIT_STEPS) {
+            throw new AgentError(`"steps" must be a whole number from 1 to ${MAX_EDIT_STEPS}`);
           }
 
           let applied = 0;
