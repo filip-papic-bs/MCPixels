@@ -23,8 +23,8 @@ even-sized region centred on the origin runs `-n/2 .. n/2-1`, so a 200×200 area
 
 | tool | what it does |
 | --- | --- |
-| `draw_pixel_art` | The only tool you send pixel data to: `rows` of palette characters, an `ops` command string, or both, plus optional `mirror`. |
-| `read_canvas` | Reads a region back in exactly the format `draw_pixel_art` accepts, and reports the canvas state: exact cell and colour counts, bounds, selection, view, history depth and every tool limit. |
+| `draw_pixel_art` | The only tool you send pixel data to: `rows` of palette characters (plain or run-length, see `format`), an `ops` command string, or both, plus optional `mirror`. |
+| `read_canvas` | Reads a region back in either format `draw_pixel_art` accepts, and reports the canvas state: exact cell and colour counts, bounds, selection, view, history depth and every tool limit. |
 | `selection` | Moves art that is already there — duplicate, move, erase, flip, rotate, copy/cut/paste, set/dismiss the marquee. No pixel data travels through it. |
 | `edit` | `undo`, `redo` (up to 20 steps), `clear-canvas`. One timeline, shared with the person. |
 | `view` | Frames a region on screen. Draws nothing. |
@@ -49,25 +49,41 @@ draw_pixel_art({
   around your shape, so build up in layers rather than padding a sprite with background.
 - Anything off-canvas is clipped, not an error.
 
-### The one limit worth planning around
-
-`rows` accepts at most **256 rows**, at most **256 characters** each, and at most
-**32,768 cells per call** — counted as widest row × row count, so the 256×256 the first
-two limits imply is twice what a call will take. Plan for the area, not the sides:
-
-| shape | cells | fits? |
-| --- | --- | --- |
-| 128×256 | 32,768 | yes, exactly |
-| 181×181 | 32,761 | yes |
-| 200×200 | 40,000 | **no** — split into 200×160 + 200×40, or lay the flat areas in with `ops` |
-| 256×256 | 65,536 | **no** |
-
 Short rows are padded to the widest row with `.`, so an accidentally short row costs you
 nothing but earns a warning — and a *long* row raises the area for every row.
 
-`ops` is not counted against this cap, so a big sky or a solid ground plane costs almost
-nothing as `c #2d7ff9; rect -100 -100 99 -20 f` and leaves the whole cell budget for the
-detail that actually needs pixels.
+## Big pictures go through `format: "rle"`
+
+Plain characters cost one character per cell, and a call accepts **32,768 cells** that way
+— counted as widest row × row count, so 200×200 is over the limit and 256×256 is double
+it. Set `format: "rle"` and each row becomes **runs of an optional count then one
+character**, so a 200×200 scene is one call and one undo step instead of two of each:
+
+```js
+draw_pixel_art({
+  origin: [-100, -100],
+  palette: { s: "#2d7ff9", g: "#45b86b", k: "#161616" },
+  // 200x200 = 40,000 cells, about 1,500 characters on the wire.
+  rows: [...Array(120).fill("200s"), ...Array(60).fill("200g"), ...Array(20).fill("80g40k80g")],
+  format: "rle",
+})
+```
+
+`12k8r.` is twelve `k`, eight `r`, one `.`. A run with no count is one cell, so `krw` is
+three cells. `.` and `-` run like any other character.
+
+| | `"chars"` | `"rle"` |
+| --- | --- | --- |
+| rows per call | 256 | 1024 |
+| characters per row | 256 | 1024 |
+| **cells per call** | **32,768** | **262,144** (512×512) |
+
+**Digits are always run counts in `rle`,** so no palette key may be a digit there — the
+call is rejected rather than misread. Digit keys are still fine in `"chars"`.
+
+Two things still beat both encodings. `ops` is not counted against either cell cap, so a
+solid sky is cheapest as `c #2d7ff9; rect -100 -100 99 -20 f`. And `mirror` halves anything
+symmetrical. Reach for `rle` for the dense, irregular detail that is left.
 
 ## Large geometry goes through `ops`
 
@@ -102,16 +118,21 @@ things to watch:
 
 - In a read, `.` means **empty**. Drawn back, `.` means **keep what is there**. To clear
   a cell you have to write `-`.
-- A read is capped at roughly 2,600 tokens whatever is on the canvas. A named region up to
-  64×64 comes back at native resolution; anything larger is block-downscaled. An omitted
-  `region` gets a tighter budget still — at most 48 characters a side.
-- `exact` is `true` only when **both** conditions hold: the region is at most 64×64, *and*
-  it holds at most 62 distinct colours. Past 62, the rare ones fold into the nearest
-  colour that was kept and `folded` counts them. So a 40×40 region with 80 colours reads
-  at native resolution and is still not exact.
+- **Check `format` before you read the rows.** A read returns `"chars"` or `"rle"`, in the
+  same two encodings `draw_pixel_art` accepts, and picks whichever describes the region
+  best. Feed `format` straight back with the rows and the loop closes either way.
+- A region up to 64×64 comes back as plain characters at native resolution. Larger regions
+  come back as **exact `rle`** when they compress inside the read budget — up to 262,144
+  cells, so a flat or sparse 200×200 scene reads back perfectly — and are block-downscaled
+  only when they do not. An omitted `region` is capped tighter still, at 48 characters a
+  side, since it can span the whole canvas.
+- `exact` is `true` only when **both** conditions hold: `scale` is 1, *and* the region holds
+  at most 52 distinct colours. Past 52, the rare ones fold into the nearest colour that was
+  kept and `folded` counts them. So a 40×40 region with 80 colours reads at native
+  resolution and is still not exact.
 - If `exact` is false, treat the rows as an overview and read smaller regions in turn
-  before relying on them. There is currently no way to pull a region larger than 64×64
-  back exactly in one call.
+  before relying on them. Detailed or dithered art is what fails to compress, so that is
+  where tiled reads are still needed.
 
 Omit `region` for an overview of everything painted.
 

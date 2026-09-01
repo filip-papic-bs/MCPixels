@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CANVAS_SIZE, cellFromColor, cellIndex } from "./pixels.ts";
-import { MAX_OPS, READ_OVERVIEW_BUDGET, AgentError, planDraw, readRegion, scaleForRegion } from "./agent/encode.ts";
+import {
+  MAX_OPS,
+  READ_OVERVIEW_BUDGET,
+  AgentError,
+  decodeRleRow,
+  encodeRleRow,
+  planDraw,
+  readRegion,
+  scaleForRegion,
+} from "./agent/encode.ts";
 import type { DrawInput, DrawPlan } from "./agent/encode.ts";
 
 const emptyCells = () => new Uint32Array(CANVAS_SIZE * CANVAS_SIZE);
@@ -159,28 +168,109 @@ test("large regions downscale deterministically and keep every painted block", (
   assert.equal(scaleForRegion(65, 20), 2);
   assert.equal(scaleForRegion(64, 64), 1);
 
+  // Past MAX_RLE_CELLS an exact run-length read is not even attempted, so this
+  // is the shape of art that still has to be downscaled however flat it is.
   const cells = emptyCells();
-  for (let y = -128; y <= 127; y += 1) for (let x = -128; x <= 127; x += 1) paint(cells, x, y, "#161616");
+  for (let y = -300; y <= 299; y += 1) for (let x = -300; x <= 299; x += 1) paint(cells, x, y, "#161616");
 
   // An omitted region can span the whole canvas, so it gets the tighter budget.
   const overview = readRegion(cells, null);
   assert.ok(overview.rows.length <= READ_OVERVIEW_BUDGET);
+  assert.equal(overview.format, "chars");
   assert.equal(overview.exact, false, "a downscaled read never claims to be exact");
   assert.deepEqual(readRegion(cells, null), overview, "the same canvas always reads identically");
 
   // A region the agent named keeps the larger budget.
-  const named = readRegion(cells, { minX: -128, minY: -128, maxX: 127, maxY: 127 });
-  assert.equal(named.scale, 4);
-  assert.equal(named.rows.length, 64);
-  assert.equal(named.rows[0].length, 64);
+  const named = readRegion(cells, { minX: -300, minY: -300, maxX: 299, maxY: 299 });
+  assert.equal(named.scale, 10);
+  assert.equal(named.rows.length, 60);
+  assert.equal(named.rows[0].length, 60);
 
   // A block holding a single painted pixel resolves to that pixel's color.
+  // Centred, so the region is not clipped back to the canvas and stays over the
+  // cap: sparse art compresses beautifully and would otherwise read exactly.
   const sparse = emptyCells();
   paint(sparse, 3, 3, "#ff5c35");
-  const zoomed = readRegion(sparse, { minX: 0, minY: 0, maxX: 127, maxY: 127 });
-  assert.equal(zoomed.scale, 2);
-  assert.equal(zoomed.rows[1][1], "a");
+  const zoomed = readRegion(sparse, { minX: -300, minY: -300, maxX: 299, maxY: 299 });
+  assert.equal(zoomed.scale, 10);
+  assert.equal(zoomed.rows[30][30], "a");
   assert.deepEqual(zoomed.palette, { a: "#ff5c35" });
+});
+
+test("run-length rows decode, encode and survive a round trip", () => {
+  assert.equal(decodeRleRow("12k8r.", "row"), "kkkkkkkkkkkkrrrrrrrr.");
+  assert.equal(decodeRleRow("k", "row"), "k");
+  assert.equal(decodeRleRow("", "row"), "");
+  assert.equal(decodeRleRow("3-2.", "row"), "---..", "the reserved characters run like any other");
+
+  assert.equal(encodeRleRow("kkkkkkkkkkkkrrrrrrrr."), "12k8r.");
+  assert.equal(encodeRleRow(""), "");
+  assert.equal(encodeRleRow("krw"), "krw", "single cells cost no count");
+
+  // The property that matters: for any row of plain cells, encode then decode is
+  // identity. Digits are absent by construction — they cannot be palette keys in
+  // rle, which is exactly why a count can never be mistaken for a cell.
+  for (const row of ["", "k", "....", "krkrkrkr", "aB.cD-", "k".repeat(300), "kk", "kkr", `${"ab".repeat(40)}300`]) {
+    const plain = row.replace(/\d/g, "z");
+    assert.equal(decodeRleRow(encodeRleRow(plain), "row"), plain, `round trip of "${plain.slice(0, 20)}"`);
+  }
+
+  assert.throws(() => decodeRleRow("12", "row"), /has no character after it/);
+  assert.throws(() => decodeRleRow("0k", "row"), /count of 0/);
+  assert.throws(() => decodeRleRow("2000k", "row"), /wider than the canvas/);
+});
+
+test("a large scene fits one rle call and reads back exactly", () => {
+  const cells = emptyCells();
+  const palette = { s: "#2d7ff9", g: "#45b86b", k: "#161616" };
+
+  // The 200x200 that needed two calls as plain characters: 40,000 cells, well
+  // past MAX_ROWS_CELLS, but a few thousand characters as runs.
+  const rows: string[] = [];
+  for (let row = 0; row < 200; row += 1) {
+    if (row < 120) rows.push("200s");
+    else if (row < 180) rows.push("200g");
+    else rows.push("80g40k80g");
+  }
+  const source = JSON.stringify(rows).length;
+  assert.ok(source < 4_000, `the whole scene is ${source} characters of rows`);
+
+  const plan = draw(cells, { origin: [-100, -100], palette, rows, format: "rle" });
+  assert.equal(plan.painted, 40_000, "one call, one undo step, forty thousand cells");
+  assert.equal(plan.clipped, 0);
+  assert.deepEqual(plan.bounds, { minX: -100, minY: -100, maxX: 99, maxY: 99 });
+
+  // And it comes back exactly, which plain characters could not manage.
+  const read = readRegion(cells, { minX: -100, minY: -100, maxX: 99, maxY: 99 });
+  assert.equal(read.format, "rle");
+  assert.equal(read.exact, true);
+  assert.equal(read.scale, 1);
+  assert.deepEqual(read.size, [200, 200]);
+
+  const fresh = emptyCells();
+  draw(fresh, { origin: read.origin, palette: read.palette, rows: read.rows, format: read.format });
+  assert.deepEqual(fresh, cells, "an exact read fed straight back reproduces the canvas");
+});
+
+test("rle rejects what it cannot represent", () => {
+  const cells = emptyCells();
+
+  assert.throws(
+    () => planDraw(cells, { origin: [0, 0], palette: { "1": "#161616" }, rows: ["3."], format: "rle" }),
+    /cannot be a digit/,
+    "a digit key would be unreadable as anything but a count",
+  );
+  // The same palette is fine as plain characters, so nothing that worked breaks.
+  assert.equal(planDraw(cells, { origin: [0, 0], palette: { "1": "#161616" }, rows: ["111"] }).painted, 3);
+
+  assert.throws(() => planDraw(cells, { origin: [0, 0], rows: ["3q"], format: "rle" }), /not in the palette/);
+  assert.throws(() => planDraw(cells, { origin: [0, 0], rows: ["3."], format: "chars2" }), /"chars" or "rle"/);
+
+  // Plain characters over the area cap point at the encoding that would fit.
+  assert.throws(
+    () => planDraw(cells, { origin: [0, 0], palette: { k: "#161616" }, rows: Array(200).fill("k".repeat(200)) }),
+    /format:"rle"/,
+  );
 });
 
 test("a read is only exact when both geometry and color survive", () => {

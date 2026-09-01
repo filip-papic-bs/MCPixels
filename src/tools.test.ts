@@ -149,8 +149,10 @@ test("a read reports the limits and exact counts even when the rows are coarse",
   await call("draw_pixel_art", { ops: "c #161616;rect -50 -50 49 49 f;c #ff5c35;rect -10 -10 9 9 f" });
 
   const read = await call("read_canvas", { region: [-50, -50, 49, 49] });
-  assert.equal(read.exact, false, "a 100x100 region cannot come back exactly");
-  assert.ok(read.scale > 1);
+  // Flat art this size compresses, so it comes back exact as runs rather than
+  // as a downscaled overview — the counts below are exact either way.
+  assert.equal(read.format, "rle");
+  assert.equal(read.exact, true);
 
   assert.equal(read.painted, 10_000, "every painted cell is counted, not every block");
   assert.equal(read.empty, 0);
@@ -158,8 +160,9 @@ test("a read reports the limits and exact counts even when the rows are coarse",
   assert.equal(read.distinctColors, 2);
   assert.equal(read.paintedTotal, 10_000);
 
-  assert.equal(read.limits.maxCellsPerDraw, MAX_ROWS_CELLS);
-  assert.equal(read.limits.exactReadSize, READ_BUDGET);
+  const limits = read.limits as Record<string, number>;
+  assert.equal(limits.maxCellsPerDraw, MAX_ROWS_CELLS);
+  assert.equal(limits.exactReadSize, READ_BUDGET);
   assert.deepEqual(read.history, { undo: 1, redo: 0 });
 
   const half = await call("read_canvas", { region: [-50, -50, 49, -1] });

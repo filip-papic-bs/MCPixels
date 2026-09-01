@@ -18,6 +18,9 @@ import {
   MAX_OPS_LENGTH,
   MAX_PALETTE,
   MAX_PX_PAIRS,
+  MAX_RLE_CELLS,
+  MAX_RLE_ROWS,
+  MAX_RLE_SOURCE_LENGTH,
   MAX_ROWS,
   MAX_ROWS_CELLS,
   MAX_ROW_LENGTH,
@@ -41,6 +44,9 @@ const AGENT_LIMITS = {
   maxCellsPerDraw: MAX_ROWS_CELLS,
   maxRows: MAX_ROWS,
   maxRowLength: MAX_ROW_LENGTH,
+  maxCellsPerDrawRle: MAX_RLE_CELLS,
+  maxRowsRle: MAX_RLE_ROWS,
+  maxRowLengthRle: MAX_RLE_SOURCE_LENGTH,
   maxPaletteEntries: MAX_PALETTE,
   maxOps: MAX_OPS,
   maxOpsLength: MAX_OPS_LENGTH,
@@ -133,6 +139,7 @@ export async function registerAgentTools(
         description:
           `Draw editable pixel art on the live canvas; x and y run ${CANVAS_MIN}..${CANVAS_MAX}, y downward. ` +
           'rows place one-character palette entries from origin; "." keeps a cell and "-" erases it. ' +
+          'Set format:"rle" to send those rows as runs instead ("12k8r." is twelve k, eight r, one dot), which fits a whole large scene in one call. ' +
           'ops are ";"-separated: c COLOR; px x y...; line x0 y0 x1 y1; rect/ellipse x0 y0 x1 y1 [f]; bucket x y; recolor from to x0 y0 x1 y1. ' +
           'COLOR is a palette key, hex, or "-"; f fills. Ops use absolute coordinates. ' +
           "Rows run first and later writes win. Off-canvas clips. One call is one undo step; invalid input changes nothing.",
@@ -148,11 +155,20 @@ export async function registerAgentTools(
             rows: {
               type: "array",
               description:
-                `Picture rows, top to bottom. At most ${MAX_ROWS} rows of ${MAX_ROW_LENGTH} characters, ` +
-                `and at most ${MAX_ROWS_CELLS} cells per call counted as widest row x row count — so ${MAX_ROW_LENGTH}x${MAX_ROW_LENGTH} is over the limit. ` +
-                "Beyond that, send flat areas as ops and split the detail across calls.",
-              items: { type: "string", maxLength: MAX_ROW_LENGTH },
-              maxItems: MAX_ROWS,
+                `Picture rows, top to bottom. As "chars": at most ${MAX_ROWS} rows of ${MAX_ROW_LENGTH} characters and ${MAX_ROWS_CELLS} cells per call, ` +
+                `counted as widest row x row count — so ${MAX_ROW_LENGTH}x${MAX_ROW_LENGTH} is over the limit. ` +
+                `As "rle": at most ${MAX_RLE_ROWS} rows of ${MAX_RLE_SOURCE_LENGTH} characters decoding to ${MAX_RLE_CELLS} cells, which covers a ${Math.sqrt(MAX_RLE_CELLS)}x${Math.sqrt(MAX_RLE_CELLS)} picture in one call.`,
+              items: { type: "string", maxLength: MAX_RLE_SOURCE_LENGTH },
+              maxItems: MAX_RLE_ROWS,
+            },
+            format: {
+              type: "string",
+              enum: ["chars", "rle"],
+              description:
+                'How rows are encoded. Default "chars": one character per cell. ' +
+                '"rle" reads each row as runs of an optional count then one character, so "12k8r." is twelve k, eight r, one dot — ' +
+                "the same picture at a fraction of the size, which is how a large scene fits in one call and one undo step. " +
+                'Digits are run counts in "rle", so no palette key may be a digit there.',
             },
             ops: {
               type: "string",
@@ -219,8 +235,9 @@ export async function registerAgentTools(
         description:
           "Read the canvas back in the same {origin, palette, rows} format draw_pixel_art accepts, so you can read, edit the rows and draw them straight back. " +
           'Here "." marks an empty cell, but drawn back it preserves the destination — use "-" to erase. ' +
-          `Omit region for an overview of everything painted, downscaled to at most ${READ_OVERVIEW_BUDGET} characters a side; name a region for native resolution up to ${READ_BUDGET}x${READ_BUDGET}, larger areas are block-downscaled. ` +
-          `"exact" is true only when the region is at most ${READ_BUDGET}x${READ_BUDGET} AND holds at most ${READ_ALPHABET.length} distinct colors — rarer colors fold into the nearest kept one. ` +
+          `Omit region for an overview of everything painted, downscaled to at most ${READ_OVERVIEW_BUDGET} characters a side; name a region for native resolution up to ${READ_BUDGET}x${READ_BUDGET}. ` +
+          `A larger region comes back exact as "format":"rle" runs when it compresses well enough — up to ${MAX_RLE_CELLS} cells — and is block-downscaled only when it does not. Always check "format" before reading the rows. ` +
+          `"exact" is true only when scale is 1 AND the region holds at most ${READ_ALPHABET.length} distinct colors; rarer colors fold into the nearest kept one. ` +
           "When it is false the rows are an approximation: read smaller regions in turn before relying on them. " +
           'Every read also reports the state you need to plan with — "painted"/"empty"/"colors" counts that stay exact however coarse the rows are, ' +
           'plus "art", "selection", "view", "history" and the full "limits" table. Read once before a large draw and you will not have to learn a cap by hitting it.',

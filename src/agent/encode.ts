@@ -27,9 +27,15 @@ export const MAX_PALETTE = 64;
 export const OP_COORDINATE_LIMIT = 1024;
 export const READ_BUDGET = 64;
 export const READ_OVERVIEW_BUDGET = 48;
-export const READ_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+export const READ_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 export const HINT_MIN_CELLS = 64;
 export const READ_HISTOGRAM = 16;
+
+export const MAX_RLE_ROWS = 1024;
+export const MAX_RLE_ROW_CELLS = 1024;
+export const MAX_RLE_CELLS = 262_144;
+export const MAX_RLE_SOURCE_LENGTH = 1024;
+export const READ_RLE_BUDGET = 6_000;
 
 const HEX_COLOR = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/;
 const WHOLE_NUMBER = /^-?\d+$/;
@@ -100,6 +106,61 @@ export function parsePalette(input: unknown): Map<string, number> {
 }
 
 // ---------------------------------------------------------------------------
+// Run-length rows
+// ---------------------------------------------------------------------------
+
+const isDigit = (char: string) => char >= "0" && char <= "9";
+
+/**
+ * Expands one run-length row into plain characters. A run is an optional count
+ * followed by exactly one character, so `12k8r.` is twelve k, eight r, one dot.
+ * Digits can never be palette keys here, which is what keeps the two apart.
+ */
+export function decodeRleRow(source: string, where: string): string {
+  if (source.length > MAX_RLE_SOURCE_LENGTH) {
+    fail(`${where}: ${source.length} characters exceeds the limit of ${MAX_RLE_SOURCE_LENGTH} for a run-length row`);
+  }
+  const parts: string[] = [];
+  let cells = 0;
+  let at = 0;
+  while (at < source.length) {
+    let digits = "";
+    while (at < source.length && isDigit(source[at])) {
+      digits += source[at];
+      at += 1;
+    }
+    if (at >= source.length) {
+      fail(`${where}: run count "${digits}" has no character after it — write ${digits} then the palette key`);
+    }
+    const char = source[at];
+    at += 1;
+    const count = digits === "" ? 1 : Number(digits);
+    if (count === 0) fail(`${where}: a run count of 0 draws nothing — leave the run out instead`);
+    // Checked before expanding, so an absurd count cannot allocate first.
+    if (cells + count > MAX_RLE_ROW_CELLS) {
+      fail(`${where}: the row decodes to more than ${MAX_RLE_ROW_CELLS} cells, wider than the canvas`);
+    }
+    cells += count;
+    parts.push(char.repeat(count));
+  }
+  return parts.join("");
+}
+
+/** Encodes plain characters back into runs. `kkkkk` becomes `5k`. */
+export function encodeRleRow(chars: string): string {
+  let out = "";
+  let at = 0;
+  while (at < chars.length) {
+    const char = chars[at];
+    let run = 1;
+    while (at + run < chars.length && chars[at + run] === char) run += 1;
+    out += run === 1 ? char : `${run}${char}`;
+    at += run;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // The draw planner
 // ---------------------------------------------------------------------------
 
@@ -107,9 +168,18 @@ export type DrawInput = {
   origin?: unknown;
   palette?: unknown;
   rows?: unknown;
+  format?: unknown;
   ops?: unknown;
   mirror?: unknown;
 };
+
+export type RowFormat = "chars" | "rle";
+
+export function readFormat(value: unknown): RowFormat {
+  if (value === undefined || value === null) return "chars";
+  if (value === "chars" || value === "rle") return value;
+  fail(`"format" must be "chars" or "rle"`);
+}
 
 function readMirror(mirror: unknown) {
   if (mirror === undefined || mirror === null) return { flipX: false, flipY: false };
@@ -146,6 +216,12 @@ export function planDraw(cells: Uint32Array, input: DrawInput): DrawPlan {
   if (!hasRows && !hasOps) fail(`draw needs "rows" or "ops"`);
 
   const palette = parsePalette(input.palette);
+  if (readFormat(input.format) === "rle") {
+    const digitKey = [...palette.keys()].find(isDigit);
+    if (digitKey !== undefined) {
+      fail(`palette key "${digitKey}" cannot be a digit when format is "rle" — digits are run counts there`);
+    }
+  }
   const warnings: string[] = [];
   const writes: Write[] = [];
 
@@ -215,18 +291,30 @@ function planRows(
   if (!Array.isArray(rows) || rows.some((row) => typeof row !== "string")) {
     fail(`"rows" must be an array of strings`);
   }
-  const lines = rows as string[];
-  if (lines.length > MAX_ROWS) fail(`rows: ${lines.length} rows exceeds the limit of ${MAX_ROWS}`);
+  const source = rows as string[];
+  const rle = readFormat(input.format) === "rle";
+
+  const maxRows = rle ? MAX_RLE_ROWS : MAX_ROWS;
+  if (source.length > maxRows) fail(`rows: ${source.length} rows exceeds the limit of ${maxRows}`);
+
+  const lines = rle ? source.map((row, index) => decodeRleRow(row, `rows: row ${index + 1}`)) : source;
 
   let widest = 0;
   lines.forEach((row, index) => {
-    if (row.length > MAX_ROW_LENGTH) {
+    if (!rle && row.length > MAX_ROW_LENGTH) {
       fail(`rows: row ${index + 1} is ${row.length} characters; the limit is ${MAX_ROW_LENGTH}`);
     }
     if (row.length > widest) widest = row.length;
   });
   const area = widest * lines.length;
-  if (area > MAX_ROWS_CELLS) fail(`rows: ${area} cells exceeds the limit of ${MAX_ROWS_CELLS}`);
+  const maxCells = rle ? MAX_RLE_CELLS : MAX_ROWS_CELLS;
+  if (area > maxCells) {
+    fail(
+      rle
+        ? `rows: those runs decode to ${area} cells, over the limit of ${maxCells}`
+        : `rows: ${area} cells exceeds the limit of ${maxCells}. Send the same picture as format:"rle" to fit up to ${MAX_RLE_CELLS}`,
+    );
+  }
 
   const short = lines.map((row, index) => (row.length < widest ? index + 1 : 0)).filter((index) => index > 0);
   if (short.length > 0) {
@@ -549,6 +637,8 @@ export type ReadResult = {
   origin: [number, number];
   size: [number, number];
   scale: number;
+  /** How `rows` are encoded — plain characters, or runs of "count then character". */
+  format: RowFormat;
   /** True only when the rows are pixel-for-pixel and colour-for-colour faithful. */
   exact: boolean;
   folded: number;
@@ -567,37 +657,30 @@ export function scaleForRegion(width: number, height: number, budget = READ_BUDG
   return scale;
 }
 
-export function readRegion(cells: Uint32Array, region: SelectionBounds | null): ReadResult {
-  const budget = region ? READ_BUDGET : READ_OVERVIEW_BUDGET;
-  const art = region ?? paintedBounds(cells);
-  if (!art) {
-    return {
-      origin: [0, 0],
-      size: [0, 0],
-      scale: 1,
-      exact: true,
-      folded: 0,
-      palette: {},
-      rows: [],
-      painted: 0,
-      empty: 0,
-      colors: {},
-      distinctColors: 0,
-    };
+/** Exact per-color counts over the whole region, independent of any downscaling. */
+function tallyRegion(cells: Uint32Array, area: SelectionBounds) {
+  const histogram = new Map<number, number>();
+  let painted = 0;
+  for (let y = area.minY; y <= area.maxY; y += 1) {
+    for (let x = area.minX; x <= area.maxX; x += 1) {
+      const cell = cells[cellIndex(x, y)];
+      if (cell === EMPTY_CELL) continue;
+      painted += 1;
+      histogram.set(cell, (histogram.get(cell) ?? 0) + 1);
+    }
   }
-  const area = intersectCanvas(art);
-  if (!area) fail(`region is entirely off the ${CANVAS_MIN}..${CANVAS_MAX} canvas`);
+  return { painted, histogram };
+}
+
+/** Reduces a region to one cell per scale x scale block, picking each block's most common color. */
+function sampleRegion(cells: Uint32Array, area: SelectionBounds, scale: number) {
   const width = area.maxX - area.minX + 1;
   const height = area.maxY - area.minY + 1;
-  const scale = scaleForRegion(width, height, budget);
   const columns = Math.ceil(width / scale);
   const lines = Math.ceil(height / scale);
-
   const winners = new Uint32Array(columns * lines);
   const counts = new Map<number, number>();
   const block = new Map<number, number>();
-  const histogram = new Map<number, number>();
-  let painted = 0;
 
   for (let row = 0; row < lines; row += 1) {
     for (let column = 0; column < columns; column += 1) {
@@ -610,8 +693,6 @@ export function readRegion(cells: Uint32Array, region: SelectionBounds | null): 
         for (let x = column * scale; x < lastX; x += 1) {
           const cell = cells[cellIndex(area.minX + x, area.minY + y)];
           if (cell === EMPTY_CELL) continue;
-          painted += 1;
-          histogram.set(cell, (histogram.get(cell) ?? 0) + 1);
           const count = (block.get(cell) ?? 0) + 1;
           block.set(cell, count);
           // Most common wins; a tie goes to the lower packed value so the same
@@ -626,7 +707,12 @@ export function readRegion(cells: Uint32Array, region: SelectionBounds | null): 
       if (best !== EMPTY_CELL) counts.set(best, (counts.get(best) ?? 0) + 1);
     }
   }
+  return { winners, columns, lines, counts };
+}
 
+/** Turns sampled cells into palette characters, folding anything past the alphabet. */
+function describeSample(sample: ReturnType<typeof sampleRegion>) {
+  const { winners, columns, lines, counts } = sample;
   const ordered = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).map(([cell]) => cell);
   const kept = ordered.slice(0, READ_ALPHABET.length);
   const chars = new Map<number, string>();
@@ -652,17 +738,69 @@ export function readRegion(cells: Uint32Array, region: SelectionBounds | null): 
     palette[READ_ALPHABET[index]] = colorFromCell(cell);
   });
 
+  return { rows, palette, folded };
+}
+
+export function readRegion(cells: Uint32Array, region: SelectionBounds | null): ReadResult {
+  const budget = region ? READ_BUDGET : READ_OVERVIEW_BUDGET;
+  const art = region ?? paintedBounds(cells);
+  if (!art) {
+    return {
+      origin: [0, 0],
+      size: [0, 0],
+      scale: 1,
+      format: "chars",
+      exact: true,
+      folded: 0,
+      palette: {},
+      rows: [],
+      painted: 0,
+      empty: 0,
+      colors: {},
+      distinctColors: 0,
+    };
+  }
+  const area = intersectCanvas(art);
+  if (!area) fail(`region is entirely off the ${CANVAS_MIN}..${CANVAS_MAX} canvas`);
+  const width = area.maxX - area.minX + 1;
+  const height = area.maxY - area.minY + 1;
+
+  const { painted, histogram } = tallyRegion(cells, area);
+
+  const plainScale = scaleForRegion(width, height, budget);
+  let scale = plainScale;
+  let format: RowFormat = "chars";
+  let described = describeSample(sampleRegion(cells, area, plainScale));
+
+  if (plainScale > 1 && width * height <= MAX_RLE_CELLS) {
+    const exactly = describeSample(sampleRegion(cells, area, 1));
+    const encoded = exactly.rows.map(encodeRleRow);
+    const cost = encoded.reduce((total, row) => total + row.length + 3, 0);
+    if (cost <= READ_RLE_BUDGET && exactly.folded === 0) {
+      scale = 1;
+      format = "rle";
+      described = { ...exactly, rows: encoded };
+    }
+  }
+
   const ranked = [...histogram.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]);
   const colors: Record<string, number> = {};
   for (const [cell, count] of ranked.slice(0, READ_HISTOGRAM)) colors[colorFromCell(cell)] = count;
 
   const notes: string[] = [];
+  if (format === "rle") {
+    notes.push(
+      `format "rle": each row is runs of "count then character", so 12k is twelve k. These rows are exact — decode them, edit, and draw back with format:"rle".`,
+    );
+  }
   if (scale > 1) {
     notes.push(
       `scale ${scale}: each character covers a ${scale}x${scale} block, so these rows are an overview, not exact pixels.`,
     );
   }
-  if (folded > 0) notes.push(`${folded} rare colors were folded into the nearest kept color.`);
+  if (described.folded > 0) {
+    notes.push(`${described.folded} rare colors were folded into the nearest kept color.`);
+  }
   if (ranked.length > READ_HISTOGRAM) {
     notes.push(
       `"colors" lists the ${READ_HISTOGRAM} most used of ${ranked.length} colors; the counts it gives are exact.`,
@@ -673,12 +811,13 @@ export function readRegion(cells: Uint32Array, region: SelectionBounds | null): 
     origin: [area.minX, area.minY],
     size: [width, height],
     scale,
+    format,
     // Geometry alone is not enough: a 32x32 region with 80 colours is scale 1
     // and still lossy, so folding has to count against exactness too.
-    exact: scale === 1 && folded === 0,
-    folded,
-    palette,
-    rows,
+    exact: scale === 1 && described.folded === 0,
+    folded: described.folded,
+    palette: described.palette,
+    rows: described.rows,
     painted,
     empty: width * height - painted,
     colors,
