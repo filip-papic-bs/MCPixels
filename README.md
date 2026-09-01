@@ -1,6 +1,11 @@
 # MCPixels
 
+![A wide pixel-art banner drawn in MCPixels: neon vignettes, arcade sprites, framed mini-scenes and a green mascot](design/banner.png)
+
 A 1024×1024 pixel-art canvas that a person and an AI agent edit together, live, on the same page.
+
+**▶ [Watch the two-minute demo](https://youtu.be/K9jsr-7SKbw?cc_load_policy=1)** — the six
+tools, one shared undo stack, and a ten-frame walk cycle exported as a spritesheet.
 
 The editor is an ordinary pixel editor in any browser — draw, shapes, fill, selections, mirroring, import, PNG export, undo. In a WebMCP browser it also hands an agent **six site tools** covering everything but image import, so the agent is a real participant rather than a pixel pipe. No backend: the tools are registered by the page itself via `document.modelContext.registerTool`.
 
