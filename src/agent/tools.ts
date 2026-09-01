@@ -2,6 +2,7 @@ import {
   CANVAS_MAX,
   CANVAS_MIN,
   MAX_EXPORT_SCALE,
+  MAX_SHAPE_PIXELS,
   boundsForOrigin,
   captureRegion,
   clampOriginToCanvas,
@@ -11,7 +12,23 @@ import {
   transformRegion,
 } from "../pixels.ts";
 import type { PixelChange, SelectionBounds } from "../pixels.ts";
-import { AgentError, planDraw, readPoint, readRect, readRegion } from "./encode.ts";
+import {
+  AgentError,
+  MAX_OPS,
+  MAX_OPS_LENGTH,
+  MAX_PALETTE,
+  MAX_PX_PAIRS,
+  MAX_ROWS,
+  MAX_ROWS_CELLS,
+  MAX_ROW_LENGTH,
+  READ_ALPHABET,
+  READ_BUDGET,
+  READ_OVERVIEW_BUDGET,
+  planDraw,
+  readPoint,
+  readRect,
+  readRegion,
+} from "./encode.ts";
 import type { EditorController } from "./controller.ts";
 import type { ModelContext } from "../webmcp";
 
@@ -106,17 +123,26 @@ export async function registerAgentTools(
             origin: { ...POINT_SCHEMA, description: "Canvas position of the top-left cell of rows." },
             palette: {
               type: "object",
-              description:
-                'Character to color, e.g. {"k":"#161616","r":"#ff5c35"}. Up to 64 entries. "." and "-" are reserved.',
+              description: `Character to color, e.g. {"k":"#161616","r":"#ff5c35"}. Up to ${MAX_PALETTE} entries. "." and "-" are reserved.`,
               additionalProperties: { type: "string", pattern: "^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$" },
             },
             rows: {
               type: "array",
-              description: "Picture rows, top to bottom. Up to 256 rows of 256 characters.",
-              items: { type: "string", maxLength: 256 },
-              maxItems: 256,
+              description:
+                `Picture rows, top to bottom. At most ${MAX_ROWS} rows of ${MAX_ROW_LENGTH} characters, ` +
+                `and at most ${MAX_ROWS_CELLS} cells per call counted as widest row x row count — so ${MAX_ROW_LENGTH}x${MAX_ROW_LENGTH} is over the limit. ` +
+                "Beyond that, send flat areas as ops and split the detail across calls.",
+              items: { type: "string", maxLength: MAX_ROW_LENGTH },
+              maxItems: MAX_ROWS,
             },
-            ops: { type: "string", description: "Command string, up to 128 ops.", maxLength: 4000 },
+            ops: {
+              type: "string",
+              description:
+                `Command string, up to ${MAX_OPS} ops and ${MAX_OPS_LENGTH} characters. ` +
+                `px takes up to ${MAX_PX_PAIRS} x y pairs; one line, rect or ellipse covers up to ${MAX_SHAPE_PIXELS} pixels. ` +
+                "Ops are not counted against the rows cell limit, so large flat geometry is cheapest here.",
+              maxLength: MAX_OPS_LENGTH,
+            },
             mirror: {
               type: "string",
               enum: ["left-right", "top-bottom", "both"],
@@ -172,7 +198,11 @@ export async function registerAgentTools(
         name: "read_canvas",
         title: "Read the canvas",
         description:
-          'Read the canvas back in the same {origin, palette, rows} format draw_pixel_art accepts, so you can read, edit the rows and draw them straight back. Here "." marks an empty cell, but drawn back it preserves the destination — use "-" to erase. Omit region for an overview of everything painted; name a region for native resolution up to 64x64, larger areas are block-downscaled. When "exact" is false the rows are an approximation; read a smaller region before relying on them.',
+          "Read the canvas back in the same {origin, palette, rows} format draw_pixel_art accepts, so you can read, edit the rows and draw them straight back. " +
+          'Here "." marks an empty cell, but drawn back it preserves the destination — use "-" to erase. ' +
+          `Omit region for an overview of everything painted, downscaled to at most ${READ_OVERVIEW_BUDGET} characters a side; name a region for native resolution up to ${READ_BUDGET}x${READ_BUDGET}, larger areas are block-downscaled. ` +
+          `"exact" is true only when the region is at most ${READ_BUDGET}x${READ_BUDGET} AND holds at most ${READ_ALPHABET.length} distinct colors — rarer colors fold into the nearest kept one. ` +
+          "When it is false the rows are an approximation: read smaller regions in turn before relying on them.",
         inputSchema: {
           type: "object",
           properties: {

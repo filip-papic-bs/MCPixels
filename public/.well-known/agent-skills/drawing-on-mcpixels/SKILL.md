@@ -15,6 +15,10 @@ in a WebMCP-capable browser and six tools appear.
 Coordinates are centred: `x` and `y` both run **-512..511**, with `y` increasing
 downward. `(0, 0)` is the middle of the canvas.
 
+Because the canvas is an even number of cells across, there is no single centre cell: an
+even-sized region centred on the origin runs `-n/2 .. n/2-1`, so a 200×200 area centred on
+`(0, 0)` is `[-100, -100, 99, 99]`.
+
 ## The six tools
 
 | tool | what it does |
@@ -43,7 +47,27 @@ draw_pixel_art({
 - `palette` maps one character to one hex colour, up to 64 entries.
 - `.` leaves the cell underneath alone; `-` erases it. Stamping never scrubs the art
   around your shape, so build up in layers rather than padding a sprite with background.
-- Up to 256 rows of 256 characters per call. Anything off-canvas is clipped, not an error.
+- Anything off-canvas is clipped, not an error.
+
+### The one limit worth planning around
+
+`rows` accepts at most **256 rows**, at most **256 characters** each, and at most
+**32,768 cells per call** — counted as widest row × row count, so the 256×256 the first
+two limits imply is twice what a call will take. Plan for the area, not the sides:
+
+| shape | cells | fits? |
+| --- | --- | --- |
+| 128×256 | 32,768 | yes, exactly |
+| 181×181 | 32,761 | yes |
+| 200×200 | 40,000 | **no** — split into 200×160 + 200×40, or lay the flat areas in with `ops` |
+| 256×256 | 65,536 | **no** |
+
+Short rows are padded to the widest row with `.`, so an accidentally short row costs you
+nothing but earns a warning — and a *long* row raises the area for every row.
+
+`ops` is not counted against this cap, so a big sky or a solid ground plane costs almost
+nothing as `c #2d7ff9; rect -100 -100 99 -20 f` and leaves the whole cell budget for the
+detail that actually needs pixels.
 
 ## Large geometry goes through `ops`
 
@@ -60,8 +84,9 @@ c #2d7ff9; rect -20 -20 20 20 f; bucket 0 0
 - `bucket x y` — flood fill.
 - `recolor from to x0 y0 x1 y1` — swap one colour for another inside a rectangle.
 
-Up to 128 ops, 4000 characters. `rows` run first and later writes win, so one call can
-stamp a sprite and then rule a line across it.
+Up to 128 ops, 4000 characters. `px` takes up to 500 `x y` pairs, and a single `line`,
+`rect` or `ellipse` covers up to 50,000 pixels. `rows` run first and later writes win, so
+one call can stamp a sprite and then rule a line across it.
 
 `mirror` (`"left-right"`, `"top-bottom"`, `"both"`) repeats everything the call draws
 across the canvas centre — draw half a symmetrical thing and let the tool write the
@@ -77,10 +102,16 @@ things to watch:
 
 - In a read, `.` means **empty**. Drawn back, `.` means **keep what is there**. To clear
   a cell you have to write `-`.
-- A read is capped at roughly 2,600 tokens whatever is on the canvas: a named region up
-  to 64×64 comes back at native resolution, anything larger is block-downscaled and
-  `exact` comes back `false`. If `exact` is false, read a smaller region before relying
-  on the rows.
+- A read is capped at roughly 2,600 tokens whatever is on the canvas. A named region up to
+  64×64 comes back at native resolution; anything larger is block-downscaled. An omitted
+  `region` gets a tighter budget still — at most 48 characters a side.
+- `exact` is `true` only when **both** conditions hold: the region is at most 64×64, *and*
+  it holds at most 62 distinct colours. Past 62, the rare ones fold into the nearest
+  colour that was kept and `folded` counts them. So a 40×40 region with 80 colours reads
+  at native resolution and is still not exact.
+- If `exact` is false, treat the rows as an overview and read smaller regions in turn
+  before relying on them. There is currently no way to pull a region larger than 64×64
+  back exactly in one call.
 
 Omit `region` for an overview of everything painted. The reply also carries `art` (the
 bounds of everything painted), `selection`, and the person's current `view`.
